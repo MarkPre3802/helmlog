@@ -3005,7 +3005,7 @@ async def test_instrument_calibration_in_parameters(storage: Storage) -> None:
     # Should be the last category
     assert cats[-1] == "instrument_calibration"
 
-    # All 15 calibration params present
+    # All 17 calibration params present
     cal_params = next(c for c in data["categories"] if c["category"] == "instrument_calibration")
     param_names = [p["name"] for p in cal_params["parameters"]]
     expected = [
@@ -3023,6 +3023,8 @@ async def test_instrument_calibration_in_parameters(storage: Storage) -> None:
         "trim_offset",
         "leeway_coefficient",
         "rudder_angle_offset",
+        "compass_offset_port",
+        "compass_offset_stbd",
         "mast_height",
     ]
     assert param_names == expected
@@ -3042,6 +3044,26 @@ async def test_instrument_calibration_labels_no_h5000_suffix(storage: Storage) -
 
     for name in ("heel_offset", "trim_offset", "leeway_coefficient", "rudder_angle_offset"):
         assert "H5000" not in by_name[name]["label"], f"{name} should not have H5000 in label"
+
+
+@pytest.mark.asyncio
+async def test_compass_offsets_seeded_into_controls_table(storage: Storage) -> None:
+    """#711 follow-up: migration v86 seeds the per-tack compass offsets
+    into the controls table so they appear on /admin/controls alongside
+    the rest of the instrument-calibration controls."""
+    cur = await storage._conn().execute(
+        "SELECT name, label, unit, category FROM controls"
+        " WHERE name IN ('compass_offset_port', 'compass_offset_stbd')"
+        " ORDER BY name"
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    assert len(rows) == 2, f"expected both compass-offset rows, got {rows}"
+    by_name = {r["name"]: r for r in rows}
+    assert by_name["compass_offset_port"]["label"] == "Compass offset (port tack)"
+    assert by_name["compass_offset_stbd"]["label"] == "Compass offset (stbd tack)"
+    for r in rows:
+        assert r["unit"] == "°"
+        assert r["category"] == "instrument_calibration"
 
 
 @pytest.mark.asyncio

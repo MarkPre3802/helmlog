@@ -2213,6 +2213,12 @@ class Storage:
         # up admin changes. Default 10 is a reasonable starting point for a
         # 30–40 ft sailboat — admin can tune via /admin/boats.
         self._leeway_k: float = 10.0
+        # Per-tack compass offsets for the live current compute (#711). Loaded
+        # from boat_settings on connect; refresh_compass_offsets() picks up
+        # admin changes. Both default to 0.0 so non-tuned boats keep current
+        # behavior.
+        self._compass_offset_port: float = 0.0
+        self._compass_offset_stbd: float = 0.0
         self._last_rudder_write: float = 0.0
         self._last_attitude_write: float = 0.0
         # Web response cache (#594). Optional; web.py binds a WebCache
@@ -2294,7 +2300,16 @@ class Storage:
         stw = self._live["bsp_kts"]
         hdg = self._live["heading_deg"]
         heel = self._live.get("heel_deg")
-        result = compute_set_drift(sog, cog, stw, hdg, heel_deg=heel, leeway_k=self._leeway_k)
+        result = compute_set_drift(
+            sog,
+            cog,
+            stw,
+            hdg,
+            heel_deg=heel,
+            leeway_k=self._leeway_k,
+            compass_offset_port=self._compass_offset_port,
+            compass_offset_stbd=self._compass_offset_stbd,
+        )
         if result is None:
             return
         set_raw, drift_raw = result
@@ -2402,6 +2417,29 @@ class Storage:
                 break
         return self._leeway_k
 
+    async def refresh_compass_offsets(self) -> tuple[float, float]:
+        """Reload ``boat_settings.compass_offset_port`` /
+        ``compass_offset_stbd`` into the cached attributes (#711). Returns
+        ``(port, stbd)``. Called from ``connect()`` and on every settings
+        write that touches either parameter."""
+        try:
+            rows = await self.current_boat_settings(race_id=None)
+        except Exception:
+            return (self._compass_offset_port, self._compass_offset_stbd)
+        import contextlib
+
+        for row in rows:
+            param = row["parameter"]
+            if param not in ("compass_offset_port", "compass_offset_stbd"):
+                continue
+            with contextlib.suppress(TypeError, ValueError):
+                val = float(row["value"])
+                if param == "compass_offset_port":
+                    self._compass_offset_port = val
+                else:
+                    self._compass_offset_stbd = val
+        return (self._compass_offset_port, self._compass_offset_stbd)
+
     async def refresh_smoothing(self) -> dict[str, float]:
         """Reload per-channel time constants from ``app_settings`` and apply
         them to the live smoothers without losing accumulated state.
@@ -2462,6 +2500,7 @@ class Storage:
         self._active_race_id = current.id if current is not None else None
         await self.refresh_smoothing()
         await self.refresh_leeway_k()
+        await self.refresh_compass_offsets()
 
     async def close(self) -> None:
         """Flush any buffered writes and close the database connections."""
@@ -2569,9 +2608,15 @@ class Storage:
         if current < 41:
             await self._migrate_v41_sail_changes()
 
-        # Post-DDL data migration for v55 (unified controls)
+        # Post-DDL data migration for v55 (unified controls).
         if current < 55:
             await self._migrate_v55_controls()
+
+        # PARAMETERS-as-source-of-truth sync (#711 follow-up). Always called;
+        # idempotent INSERT OR IGNORE means new ParameterDef additions to
+        # boat_settings.PARAMETERS auto-flow into the controls table on the
+        # next service start without needing a new migration each time.
+        await self._sync_controls_from_parameters()
 
         # Post-DDL data migration for v56 (seed categories)
         if current < 56:
@@ -2880,6 +2925,33 @@ class Storage:
             len(PARAMETERS) + len(aruco_rows),
             len(aruco_rows),
         )
+
+    async def _sync_controls_from_parameters(self) -> None:
+        """Ensure every ParameterDef in ``boat_settings.PARAMETERS`` is
+        present in the ``controls`` table (#711 follow-up).
+
+        Runs every connect. ``INSERT OR IGNORE`` against the UNIQUE(name)
+        constraint makes it idempotent — existing rows aren't touched
+        (admins may have customized label/sort_order), and new
+        PARAMETERS entries appear on /admin/controls without needing a
+        per-addition migration.
+        """
+        from helmlog.boat_settings import PARAMETERS
+
+        db = self._conn()
+        added = 0
+        for order, p in enumerate(PARAMETERS):
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO controls"
+                " (name, label, unit, input_type, category, sort_order)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (p.name, p.label, p.unit, p.input_type, p.category, order),
+            )
+            if cur.rowcount > 0:
+                added += 1
+        if added:
+            await db.commit()
+            logger.info("Synced {} new ParameterDef(s) into controls table", added)
 
     async def _migrate_v56_categories(self) -> None:
         """Data migration for v56: seed control_categories from CATEGORY_ORDER."""
@@ -9677,6 +9749,8 @@ class Storage:
         # without a service restart (#730 follow-up).
         if any(e["parameter"] == "leeway_coefficient" for e in entries):
             await self.refresh_leeway_k()
+        if any(e["parameter"] in ("compass_offset_port", "compass_offset_stbd") for e in entries):
+            await self.refresh_compass_offsets()
         return ids
 
     async def list_boat_settings(self, race_id: int | None) -> list[dict[str, Any]]:
