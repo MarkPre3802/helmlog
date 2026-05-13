@@ -472,9 +472,23 @@ async def capture_start(
     current topology — debrief is not blocked by the change.
     """
     if isinstance(recorder, AudioRecorderGroup):
-        from helmlog.usb_audio import detect_all_capture_devices
+        import asyncio as _asyncio
 
-        devices = detect_all_capture_devices(min_channels=1)
+        from helmlog.usb_audio import DetectedDevice, detect_all_capture_devices
+
+        # Chained race-end → debrief-start (#762) immediately re-acquires
+        # the USB capture devices that capture_stop just released. On
+        # Linux the kernel holds the handles for a fraction of a second,
+        # so detect_all_capture_devices can briefly return [] right after
+        # the stop. Retry a few times with short backoff before failing.
+        devices: list[DetectedDevice] = []
+        for _attempt in range(6):
+            devices = detect_all_capture_devices(min_channels=1)
+            if devices:
+                break
+            await _asyncio.sleep(0.25)
+        else:
+            logger.warning("capture_start: no devices detected after 6 retries (1.5s)")
 
         if prev_capture_group_id is not None:
             await _warn_if_device_set_changed(
