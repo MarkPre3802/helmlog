@@ -1,0 +1,32 @@
+[Unit]
+Description=Simrad Race Timer NMEA 2000 → Signal K bridge
+After=signalk.service can-interface.service
+Wants=signalk.service can-interface.service
+
+[Service]
+Type=simple
+User=helmlog
+Group=helmlog
+
+# Inherit project dir from environment; override in /etc/systemd/system/simrad-timer.service.d/
+WorkingDirectory=/home/pi/helmlog
+
+# Read SK token and CAN channel from the same .env as helmlog
+EnvironmentFile=-/home/pi/helmlog/.env
+
+ExecStart=/home/pi/.local/bin/uv run --no-sync --project /home/pi/helmlog \
+    python scripts/simrad_timer_sk.py \
+    --channel ${CAN_INTERFACE:-can0} \
+    --signalk ${SK_URL:-http://localhost:3000} \
+    --token ${SK_TOKEN:-} \
+    --log-level INFO
+
+Restart=on-failure
+RestartSec=10s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=simrad-timer
+
+[Install]
+WantedBy=multi-user.target
