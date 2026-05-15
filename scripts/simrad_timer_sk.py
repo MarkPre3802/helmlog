@@ -3,15 +3,16 @@
 Simrad Race Timer NMEA 2000 → Signal K bridge.
 
 Reads Simrad/B&G countdown timer CAN frames, reassembles Fast Packets,
-decodes the timer commands, and publishes the results to Signal K via HTTP.
+decodes the timer commands, and publishes the results to Signal K via
+WebSocket delta messages.
 
 PGNs decoded
   130845  (0x1FF1D)  Set Timer      – sets countdown duration in minutes
   130850  (0x1FF22)  Start/Stop     – starts or stops the countdown
 
 Signal K paths written (under vessels.self)
-  notifications.racing.startTimer.seconds   – duration in seconds  (on SET)
-  notifications.racing.startTimer.state     – "running" | "stopped"
+  racing.startTimer.secondsRemaining  – duration in seconds  (on SET)
+  racing.startTimer.state             – "running" | "stopped"
 
 Payload layout (from candump analysis, Simrad mfr code 0x9F41)
   Start/Stop  (PGN 130850, 12 bytes):
@@ -32,21 +33,23 @@ Usage
   python simrad_timer_sk.py [--channel can0] [--signalk http://localhost:3000]
 
 Requirements
-  pip install python-can httpx
+  pip install python-can websockets
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import can
-import httpx
+from websockets.asyncio.client import ClientConnection
+from websockets.asyncio.client import connect as _ws_connect
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +68,8 @@ CMD_START = 0x3D
 CMD_STOP  = 0x3E
 
 # ── Signal K paths ────────────────────────────────────────────────────────────
-SK_PATH_SECONDS = "notifications.racing.startTimer.seconds"
-SK_PATH_STATE   = "notifications.racing.startTimer.state"
+SK_PATH_SECONDS = "racing.startTimer.secondsRemaining"
+SK_PATH_STATE   = "racing.startTimer.state"
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -170,50 +173,66 @@ def decode_set_timer(payload: bytes) -> Optional[int]:
 # ── Signal K publisher ────────────────────────────────────────────────────────
 
 class SignalKPublisher:
-    """Publishes timer events to Signal K via HTTP PUT."""
+    """Publishes timer events to Signal K via WebSocket delta messages."""
 
     def __init__(self, base_url: str, vessel: str = "self", token: str = "") -> None:
-        self._base    = base_url.rstrip("/")
-        self._vessel  = vessel
-        self._headers = {"Authorization": f"Bearer {token}"} if token else {}
-        self._client: Optional[httpx.AsyncClient] = None
+        ws_base = base_url.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
+        qs = "?subscribe=none" + (f"&token={token}" if token else "")
+        self._uri    = ws_base + "/signalk/v1/stream" + qs
+        self._vessel = vessel
+        self._ws: Optional[ClientConnection] = None
 
     async def __aenter__(self) -> "SignalKPublisher":
-        self._client = httpx.AsyncClient(timeout=5.0, headers=self._headers)
+        await self._connect()
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        if self._client:
-            await self._client.aclose()
+        if self._ws is not None:
+            await self._ws.close()
+            self._ws = None
+
+    async def _connect(self) -> None:
+        self._ws = await _ws_connect(self._uri)
+        log.info("Connected to Signal K WebSocket: %s", self._uri)
 
     async def publish(self, event: TimerEvent) -> None:
         ts = event.timestamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         if event.action is TimerAction.SET:
             seconds = (event.minutes or 0) * 60
-            await self._put(SK_PATH_SECONDS, seconds, ts)
+            await self._send(SK_PATH_SECONDS, seconds, ts)
             log.info("SET timer → %d min (%d s)", event.minutes, seconds)
 
         elif event.action is TimerAction.START:
-            await self._put(SK_PATH_STATE, "running", ts)
+            await self._send(SK_PATH_STATE, "running", ts)
             log.info("Timer STARTED")
 
         elif event.action is TimerAction.STOP:
-            await self._put(SK_PATH_STATE, "stopped", ts)
+            await self._send(SK_PATH_STATE, "stopped", ts)
             log.info("Timer STOPPED")
 
-    async def _put(self, sk_path: str, value: object, timestamp: str) -> None:
-        url = (
-            f"{self._base}/signalk/v1/api/vessels/{self._vessel}"
-            f"/{sk_path.replace('.', '/')}"
-        )
-        assert self._client is not None
+    async def _send(self, sk_path: str, value: object, timestamp: str) -> None:
+        if self._ws is None:
+            try:
+                await self._connect()
+            except Exception as exc:
+                log.warning("Signal K reconnect failed: %s", exc)
+                return
+        assert self._ws is not None
+        delta: dict[str, Any] = {
+            "context": f"vessels.{self._vessel}",
+            "updates": [{
+                "source": {"label": "simrad-timer", "type": "NMEA2000"},
+                "timestamp": timestamp,
+                "values": [{"path": sk_path, "value": value}],
+            }],
+        }
         try:
-            resp = await self._client.put(url, json={"value": value})
-            resp.raise_for_status()
-            log.debug("PUT %-45s = %s  HTTP %d", sk_path, value, resp.status_code)
-        except httpx.HTTPError as exc:
-            log.warning("Signal K PUT failed  path=%s  error=%s", sk_path, exc)
+            await self._ws.send(json.dumps(delta))
+            log.debug("WS delta  %-45s = %s", sk_path, value)
+        except Exception as exc:
+            log.warning("Signal K send failed  path=%s  error=%s", sk_path, exc)
+            self._ws = None
 
 
 # ── CAN reader ────────────────────────────────────────────────────────────────
