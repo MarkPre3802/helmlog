@@ -6,15 +6,15 @@ Wants=signalk.service can-interface.service
 [Service]
 Type=simple
 User=helmlog
-Group=helmlog
+Group=mark
 
 # Inherit project dir from environment; override in /etc/systemd/system/simrad-timer.service.d/
-WorkingDirectory=/home/pi/helmlog
+WorkingDirectory=/home/mark/helmlog
 
 # Read SK token and CAN channel from the same .env as helmlog
-EnvironmentFile=-/home/pi/helmlog/.env
+EnvironmentFile=-/home/mark/helmlog/.env
 
-ExecStart=/home/pi/.local/bin/uv run --no-sync --project /home/pi/helmlog \
+ExecStart=/home/mark/.local/bin/uv run --no-sync --project /home/mark/helmlog \
     python scripts/simrad_timer_sk.py \
     --channel ${CAN_INTERFACE:-can0} \
     --signalk ${SK_URL:-http://localhost:3000} \
