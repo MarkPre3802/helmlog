@@ -13,6 +13,8 @@ WorkingDirectory=/home/mark/helmlog
 
 # Read SK token and CAN channel from the same .env as helmlog
 EnvironmentFile=-/home/mark/helmlog/.env
+Environment=UV_CACHE_DIR=/var/cache/helmlog
+Environment=HOME=/var/cache/helmlog
 
 ExecStart=/home/mark/.local/bin/uv run --no-sync --project /home/mark/helmlog \
     python scripts/simrad_timer_sk.py \
