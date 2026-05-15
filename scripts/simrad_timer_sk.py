@@ -286,7 +286,7 @@ def main() -> None:
         help="Signal K vessel context  (default: self)",
     )
     ap.add_argument(
-        "--token", default="",
+        "--token", default="", nargs="?", const="",
         help="Signal K bearer token (from SK Admin → Security → Access Requests)",
     )
     ap.add_argument(
