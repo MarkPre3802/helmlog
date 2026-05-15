@@ -12,15 +12,18 @@ Group=mark
 WorkingDirectory=/home/mark/helmlog
 
 # Read SK token and CAN channel from the same .env as helmlog
-EnvironmentFile=-/home/mark/helmlog/.env
+Environment=CAN_INTERFACE=can0
+Environment=SK_URL=http://localhost:3000
+Environment=SK_TOKEN=
 Environment=UV_CACHE_DIR=/var/cache/helmlog
 Environment=HOME=/var/cache/helmlog
+EnvironmentFile=-/home/mark/helmlog/.env
 
 ExecStart=/home/mark/.local/bin/uv run --no-sync --project /home/mark/helmlog \
     python scripts/simrad_timer_sk.py \
-    --channel ${CAN_INTERFACE:-can0} \
-    --signalk ${SK_URL:-http://localhost:3000} \
-    --token ${SK_TOKEN:-} \
+    --channel $CAN_INTERFACE \
+    --signalk $SK_URL \
+    --token $SK_TOKEN \
     --log-level INFO
 
 Restart=on-failure
