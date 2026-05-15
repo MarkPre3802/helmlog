@@ -25,9 +25,16 @@ Payload layout (from candump analysis, Simrad mfr code 0x9F41)
   Set Timer  (PGN 130845, 14 bytes):
     [0-1]  41 9F   Simrad manufacturer ID
     [2-5]  FF FF FF FF  reserved
-    [6-9]  07 42 00 01  reserved
+    [6-9]  07 42 00 01  SET command discriminator (broadcast has 02 00 00 01)
     [10]   minutes (0x03 / 0x04 / 0x05 …)
     [11-13] padding
+
+  Running-state broadcast  (also PGN 130845, sent on start and every ~30 s):
+    [0-1]  41 9F   Simrad manufacturer ID
+    [2-5]  FF FF FF FF  reserved
+    [6-9]  02 00 00 01  discriminator — not a SET command; ignored
+    [10-11] remaining time (encoding TBD)
+    [12-13] padding
 
 Usage
   python simrad_timer_sk.py [--channel can0] [--signalk http://localhost:3000]
@@ -163,9 +170,16 @@ def decode_start_stop(payload: bytes) -> Optional[TimerAction]:
     return None
 
 
+_SET_TIMER_DISCRIMINATOR = bytes([0x07, 0x42, 0x00, 0x01])  # payload[6:10] for SET command
+
+
 def decode_set_timer(payload: bytes) -> Optional[int]:
     """Return countdown minutes from a PGN-130845 payload, or None."""
     if not _is_simrad(payload) or len(payload) < 11:
+        return None
+    # The device also broadcasts running-state updates on this PGN (payload[6] == 0x02).
+    # Only process genuine SET commands identified by the discriminator bytes at [6:10].
+    if payload[6:10] != _SET_TIMER_DISCRIMINATOR:
         return None
     return int(payload[10])
 
