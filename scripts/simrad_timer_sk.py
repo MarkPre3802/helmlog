@@ -235,10 +235,10 @@ class SignalKPublisher:
             log.info("Timer STOPPED")
 
         elif event.action is TimerAction.RESET:
-            self._start_time = event.timestamp
             await self._send(SK_PATH_SECONDS, self._set_seconds, ts)
-            await self._send(SK_PATH_STATE, "running", ts)
-            log.info("Timer RESET → %d s", self._set_seconds)
+            if self._start_time is not None:  # running — reset the elapsed baseline
+                self._start_time = event.timestamp
+            log.info("Timer RESET → %d s (state unchanged)", self._set_seconds)
 
         elif event.action is TimerAction.NEAREST_MINUTE:
             snapped = self._snap_to_nearest_minute(event.timestamp)
