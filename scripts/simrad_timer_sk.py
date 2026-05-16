@@ -11,8 +11,7 @@ PGNs decoded
   130850  (0x1FF22)  Start/Stop     – starts or stops the countdown
 
 Signal K paths written (under vessels.self)
-  racing.startTimer.secondsRemaining  – duration in seconds  (on SET)
-  racing.startTimer.state             – "running" | "stopped"
+  racing.startTimer.state  – "running" | "stopped" | "nearest-minute" | "reset"
 
 Payload layout (from candump analysis, Simrad mfr code 0x9F41)
   Start/Stop/Reset/Nearest-Minute  (PGN 130850, 12 bytes):
@@ -77,8 +76,7 @@ CMD_NEAREST_MINUTE = 0x3F
 CMD_RESET          = 0x40
 
 # ── Signal K paths ────────────────────────────────────────────────────────────
-SK_PATH_SECONDS = "racing.startTimer.secondsRemaining"
-SK_PATH_STATE   = "racing.startTimer.state"
+SK_PATH_STATE = "racing.startTimer.state"
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -197,12 +195,9 @@ class SignalKPublisher:
     def __init__(self, base_url: str, vessel: str = "self", token: str = "") -> None:
         ws_base = base_url.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
         qs = "?subscribe=none" + (f"&token={token}" if token else "")
-        self._uri         = ws_base + "/signalk/v1/stream" + qs
-        self._vessel      = vessel
+        self._uri    = ws_base + "/signalk/v1/stream" + qs
+        self._vessel = vessel
         self._ws: Optional[ClientConnection] = None
-        self._set_seconds: int = 0                   # original SET duration — RESET restores this
-        self._effective_seconds: int = 0             # current countdown baseline (may be snapped)
-        self._start_time: Optional[datetime] = None  # wall-clock time of last START/RESET/SNAP
 
     async def __aenter__(self) -> "SignalKPublisher":
         await self._connect()
@@ -221,44 +216,23 @@ class SignalKPublisher:
         ts = event.timestamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         if event.action is TimerAction.SET:
-            self._set_seconds = (event.minutes or 0) * 60
-            self._effective_seconds = self._set_seconds
-            await self._send(SK_PATH_SECONDS, self._set_seconds, ts)
-            log.info("SET timer → %d min (%d s)", event.minutes, self._set_seconds)
+            log.info("SET timer → %d min", event.minutes)
 
         elif event.action is TimerAction.START:
-            self._effective_seconds = self._set_seconds
-            self._start_time = event.timestamp
             await self._send(SK_PATH_STATE, "running", ts)
             log.info("Timer STARTED")
 
         elif event.action is TimerAction.STOP:
-            self._start_time = None
             await self._send(SK_PATH_STATE, "stopped", ts)
             log.info("Timer STOPPED")
 
         elif event.action is TimerAction.RESET:
-            self._effective_seconds = self._set_seconds
-            await self._send(SK_PATH_SECONDS, self._set_seconds, ts)
-            if self._start_time is not None:  # running — reset the elapsed baseline
-                self._start_time = event.timestamp
-            log.info("Timer RESET → %d s (state unchanged)", self._set_seconds)
+            await self._send(SK_PATH_STATE, "reset", ts)
+            log.info("Timer RESET")
 
         elif event.action is TimerAction.NEAREST_MINUTE:
-            snapped = self._snap_to_nearest_minute(event.timestamp)
-            self._effective_seconds = snapped   # new baseline for future snaps
-            self._start_time = event.timestamp  # reset elapsed from the snapped point
-            # _set_seconds unchanged — RESET still restores the original SET value
-            await self._send(SK_PATH_SECONDS, snapped, ts)
-            log.info("Timer NEAREST MINUTE → %d s", snapped)
-
-    def _snap_to_nearest_minute(self, now: datetime) -> int:
-        """Return secondsRemaining rounded to the nearest whole minute."""
-        if self._start_time is None or self._effective_seconds == 0:
-            return self._effective_seconds
-        elapsed = (now - self._start_time).total_seconds()
-        remaining = max(0.0, self._effective_seconds - elapsed)
-        return round(remaining / 60) * 60
+            await self._send(SK_PATH_STATE, "nearest-minute", ts)
+            log.info("Timer NEAREST MINUTE")
 
     async def _send(self, sk_path: str, value: object, timestamp: str) -> None:
         if self._ws is None:
