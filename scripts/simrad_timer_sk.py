@@ -200,8 +200,9 @@ class SignalKPublisher:
         self._uri         = ws_base + "/signalk/v1/stream" + qs
         self._vessel      = vessel
         self._ws: Optional[ClientConnection] = None
-        self._set_seconds: int = 0               # last duration from SET command
-        self._start_time: Optional[datetime] = None  # wall-clock time of last START/RESET
+        self._set_seconds: int = 0                   # original SET duration — RESET restores this
+        self._effective_seconds: int = 0             # current countdown baseline (may be snapped)
+        self._start_time: Optional[datetime] = None  # wall-clock time of last START/RESET/SNAP
 
     async def __aenter__(self) -> "SignalKPublisher":
         await self._connect()
@@ -221,10 +222,12 @@ class SignalKPublisher:
 
         if event.action is TimerAction.SET:
             self._set_seconds = (event.minutes or 0) * 60
+            self._effective_seconds = self._set_seconds
             await self._send(SK_PATH_SECONDS, self._set_seconds, ts)
             log.info("SET timer → %d min (%d s)", event.minutes, self._set_seconds)
 
         elif event.action is TimerAction.START:
+            self._effective_seconds = self._set_seconds
             self._start_time = event.timestamp
             await self._send(SK_PATH_STATE, "running", ts)
             log.info("Timer STARTED")
@@ -235,6 +238,7 @@ class SignalKPublisher:
             log.info("Timer STOPPED")
 
         elif event.action is TimerAction.RESET:
+            self._effective_seconds = self._set_seconds
             await self._send(SK_PATH_SECONDS, self._set_seconds, ts)
             if self._start_time is not None:  # running — reset the elapsed baseline
                 self._start_time = event.timestamp
@@ -242,18 +246,18 @@ class SignalKPublisher:
 
         elif event.action is TimerAction.NEAREST_MINUTE:
             snapped = self._snap_to_nearest_minute(event.timestamp)
-            self._start_time = event.timestamp  # reset elapsed from this new base
-            self._set_seconds = snapped
+            self._effective_seconds = snapped   # new baseline for future snaps
+            self._start_time = event.timestamp  # reset elapsed from the snapped point
+            # _set_seconds unchanged — RESET still restores the original SET value
             await self._send(SK_PATH_SECONDS, snapped, ts)
-            await self._send(SK_PATH_STATE, "running", ts)
             log.info("Timer NEAREST MINUTE → %d s", snapped)
 
     def _snap_to_nearest_minute(self, now: datetime) -> int:
         """Return secondsRemaining rounded to the nearest whole minute."""
-        if self._start_time is None or self._set_seconds == 0:
-            return self._set_seconds
+        if self._start_time is None or self._effective_seconds == 0:
+            return self._effective_seconds
         elapsed = (now - self._start_time).total_seconds()
-        remaining = max(0.0, self._set_seconds - elapsed)
+        remaining = max(0.0, self._effective_seconds - elapsed)
         return round(remaining / 60) * 60
 
     async def _send(self, sk_path: str, value: object, timestamp: str) -> None:
