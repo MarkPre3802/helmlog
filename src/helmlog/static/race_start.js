@@ -19,6 +19,7 @@
   const specialFlagEl = document.getElementById("rs-special-flag");
   const instrToggleEl = document.getElementById("rs-instr-toggle");
   const instrStatusEl = document.getElementById("rs-instr-status");
+  const instrDurationEl = document.getElementById("rs-instr-duration");
 
   let snapshot = null;
 
@@ -136,6 +137,12 @@
     }
   }
 
+  function fmtDuration(seconds) {
+    const mm = Math.floor(seconds / 60);
+    const ss = seconds % 60;
+    return String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
+  }
+
   function renderInstrTimer() {
     const instr = snapshot && snapshot.simrad_timer;
     if (!instrToggleEl || !instrStatusEl) return;
@@ -143,6 +150,12 @@
     const on = instr && instr.instrument_timer_on;
     instrToggleEl.textContent = on ? "Disable" : "Enable";
     instrToggleEl.classList.toggle("active", !!on);
+
+    if (instrDurationEl) {
+      instrDurationEl.textContent = instr && instr.duration_s
+        ? "Set duration: " + fmtDuration(instr.duration_s)
+        : "";
+    }
 
     if (!instr || (!instr.duration_s && !instr.t0_utc)) {
       instrStatusEl.innerHTML = "No data received from B&amp;G";

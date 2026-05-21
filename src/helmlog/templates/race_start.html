@@ -46,6 +46,7 @@
   .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
   .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
   .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
+  .rs-instr-duration { font-size: .8rem; color: var(--text-muted); margin-top: .25rem; }
 </style>
 {% endblock %}
 
@@ -130,6 +131,7 @@
               {% if not is_writer %}disabled{% endif %}>—</button>
     </div>
     <div class="rs-instr-status" id="rs-instr-status">No data received</div>
+    <div class="rs-instr-duration" id="rs-instr-duration"></div>
   </div>
 
   <div class="rs-error" id="rs-error"></div>
