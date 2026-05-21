@@ -46,7 +46,8 @@
   .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
   .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
   .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
-  .rs-instr-duration { font-size: .8rem; color: var(--text-muted); margin-top: .25rem; }
+  .rs-duration { text-align: center; font-size: .9rem; color: var(--text-muted);
+                 min-height: 1.2rem; margin-top: -.25rem; padding-bottom: .25rem; }
 </style>
 {% endblock %}
 
@@ -78,6 +79,7 @@
        schedule is set (so manual arm is still possible). -->
   <div id="rs-live-view">
     <div class="rs-clock" id="rs-clock">--:--</div>
+    <div class="rs-duration" id="rs-instr-duration"></div>
 
     <div class="rs-flags">
       <div class="rs-flag-cell">
@@ -131,7 +133,6 @@
               {% if not is_writer %}disabled{% endif %}>—</button>
     </div>
     <div class="rs-instr-status" id="rs-instr-status">No data received</div>
-    <div class="rs-instr-duration" id="rs-instr-duration"></div>
   </div>
 
   <div class="rs-error" id="rs-error"></div>
