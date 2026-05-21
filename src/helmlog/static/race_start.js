@@ -19,7 +19,6 @@
   const specialFlagEl = document.getElementById("rs-special-flag");
   const instrToggleEl = document.getElementById("rs-instr-toggle");
   const instrStatusEl = document.getElementById("rs-instr-status");
-  const instrDurationEl = document.getElementById("rs-instr-duration");
 
   let snapshot = null;
 
@@ -44,28 +43,55 @@
   }
 
   function renderClock() {
-    // When the instrument timer is active and running, drive the main clock
-    // from the B&G t0_utc rather than the FSM t0_utc.
     const instr = snapshot && snapshot.simrad_timer;
-    const useInstr = instr && instr.instrument_timer_on && instr.is_running && instr.t0_utc;
-    const t0Src = useInstr ? instr.t0_utc : (snapshot && snapshot.t0_utc);
+    const instrOn = instr && instr.instrument_timer_on;
 
-    if (!t0Src) {
+    // Instrument timer active — drive clock from B&G state.
+    if (instrOn) {
+      clockEl.classList.remove("warn", "go");
+
+      if (instr.is_running && instr.t0_utc) {
+        // Running: live countdown from t0_utc.
+        const remaining = (new Date(instr.t0_utc).getTime() - virtualNowMs()) / 1000;
+        const abs = Math.abs(remaining);
+        const sign = remaining >= 0 ? "" : "+";
+        clockEl.textContent = sign + String(Math.floor(abs / 60)).padStart(2, "0") + ":" + String(Math.floor(abs % 60)).padStart(2, "0");
+        clockEl.classList.toggle("warn", remaining > 0 && remaining <= 60);
+        clockEl.classList.toggle("go", remaining <= 0);
+        return;
+      }
+
+      if (!instr.is_running && instr.stopped_remaining_s !== null && instr.stopped_remaining_s !== undefined) {
+        // Stopped: show frozen remaining time.
+        const rem = instr.stopped_remaining_s;
+        clockEl.textContent = String(Math.floor(rem / 60)).padStart(2, "0") + ":" + String(Math.floor(rem % 60)).padStart(2, "0");
+        return;
+      }
+
+      if (instr.duration_s) {
+        // Duration set but not yet started — show full duration.
+        clockEl.textContent = String(Math.floor(instr.duration_s / 60)).padStart(2, "0") + ":" + String(instr.duration_s % 60).padStart(2, "0");
+        return;
+      }
+
+      clockEl.textContent = "--:--";
+      return;
+    }
+
+    // FSM clock — existing behaviour.
+    if (!snapshot || !snapshot.t0_utc) {
       clockEl.textContent = "--:--";
       clockEl.classList.remove("warn", "go");
       return;
     }
-    const t0 = new Date(t0Src).getTime();
+    const t0 = new Date(snapshot.t0_utc).getTime();
     const now = virtualNowMs();
-    const remaining = (t0 - now) / 1000;  // seconds; negative after t0
-
-    // Display countdown as a positive number until t0, then count up.
+    const remaining = (t0 - now) / 1000;
     const displaySec = remaining >= 0 ? remaining : -remaining;
     const sign = remaining >= 0 ? "" : "+";
     const mm = Math.floor(displaySec / 60);
     const ss = Math.floor(displaySec % 60);
     clockEl.textContent = sign + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-
     clockEl.classList.toggle("warn", remaining > 0 && remaining <= 60);
     clockEl.classList.toggle("go", remaining <= 0);
   }
@@ -137,12 +163,6 @@
     }
   }
 
-  function fmtDuration(seconds) {
-    const mm = Math.floor(seconds / 60);
-    const ss = seconds % 60;
-    return String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-  }
-
   function renderInstrTimer() {
     const instr = snapshot && snapshot.simrad_timer;
     if (!instrToggleEl || !instrStatusEl) return;
@@ -150,12 +170,6 @@
     const on = instr && instr.instrument_timer_on;
     instrToggleEl.textContent = on ? "Disable" : "Enable";
     instrToggleEl.classList.toggle("active", !!on);
-
-    if (instrDurationEl) {
-      instrDurationEl.textContent = instr && instr.duration_s
-        ? "Set duration: " + fmtDuration(instr.duration_s)
-        : "";
-    }
 
     if (!instr || (!instr.duration_s && !instr.t0_utc)) {
       instrStatusEl.innerHTML = "No data received from B&amp;G";
