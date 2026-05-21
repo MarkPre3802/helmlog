@@ -514,8 +514,15 @@ async def _run() -> None:
                         # Create a race if no race is currently open.
                         current = await storage.get_current_race()
                         if current is None:
+                            from helmlog.races import local_today
+
+                            today = local_today()
+                            date_str = today.isoformat()
+                            session_type = "race"
+                            now_utc = datetime.now(UTC)
+                            race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
                             race_name = td.nmea_ts.strftime("%Y-%m-%d %H:%M")
-                            await storage.start_race(name=race_name)
+                            await storage.start_race("", now_utc, date_str, race_num, race_name, session_type)
                             logger.info("Simrad timer: auto-created race {!r}", race_name)
                     elif td.value == "stopped":
                         state = handle_stopped(state, nmea_ts=td.nmea_ts)
