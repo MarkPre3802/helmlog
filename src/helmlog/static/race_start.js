@@ -17,6 +17,8 @@
   const classFlagEl = document.getElementById("rs-class-flag");
   const prepFlagEl = document.getElementById("rs-prep-flag");
   const specialFlagEl = document.getElementById("rs-special-flag");
+  const instrToggleEl = document.getElementById("rs-instr-toggle");
+  const instrStatusEl = document.getElementById("rs-instr-status");
 
   let snapshot = null;
 
@@ -41,12 +43,18 @@
   }
 
   function renderClock() {
-    if (!snapshot || !snapshot.t0_utc) {
+    // When the instrument timer is active and running, drive the main clock
+    // from the B&G t0_utc rather than the FSM t0_utc.
+    const instr = snapshot && snapshot.simrad_timer;
+    const useInstr = instr && instr.instrument_timer_on && instr.is_running && instr.t0_utc;
+    const t0Src = useInstr ? instr.t0_utc : (snapshot && snapshot.t0_utc);
+
+    if (!t0Src) {
       clockEl.textContent = "--:--";
       clockEl.classList.remove("warn", "go");
       return;
     }
-    const t0 = new Date(snapshot.t0_utc).getTime();
+    const t0 = new Date(t0Src).getTime();
     const now = virtualNowMs();
     const remaining = (t0 - now) / 1000;  // seconds; negative after t0
 
@@ -128,6 +136,48 @@
     }
   }
 
+  function renderInstrTimer() {
+    const instr = snapshot && snapshot.simrad_timer;
+    if (!instrToggleEl || !instrStatusEl) return;
+
+    const on = instr && instr.instrument_timer_on;
+    instrToggleEl.textContent = on ? "Disable" : "Enable";
+    instrToggleEl.classList.toggle("active", !!on);
+
+    if (!instr || (!instr.duration_s && !instr.t0_utc)) {
+      instrStatusEl.innerHTML = "No data received from B&amp;G";
+      return;
+    }
+
+    if (!on) {
+      instrStatusEl.innerHTML = "Instrument timer disabled";
+      return;
+    }
+
+    if (instr.is_running && instr.t0_utc) {
+      const remaining = (new Date(instr.t0_utc).getTime() - virtualNowMs()) / 1000;
+      const mm = Math.floor(Math.abs(remaining) / 60);
+      const ss = Math.floor(Math.abs(remaining) % 60);
+      const sign = remaining >= 0 ? "" : "+";
+      instrStatusEl.innerHTML =
+        '<span class="running">Running</span> — ' +
+        sign + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
+      return;
+    }
+
+    if (!instr.is_running && instr.stopped_remaining_s !== null && instr.stopped_remaining_s !== undefined) {
+      const rem = instr.stopped_remaining_s;
+      const mm = Math.floor(rem / 60);
+      const ss = Math.floor(rem % 60);
+      instrStatusEl.innerHTML =
+        '<span class="stopped">Stopped</span> — ' +
+        String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0") + " remaining";
+      return;
+    }
+
+    instrStatusEl.innerHTML = "Waiting for B&amp;G data";
+  }
+
   function renderLineCarryover() {
     const el = document.getElementById("rs-line-carryover");
     if (!el || !snapshot || !snapshot.start_line) return;
@@ -194,6 +244,7 @@
       renderClock();
       renderScheduledStart();
       renderLineMetrics(snapshot.line_metrics);
+      renderInstrTimer();
       showError("");
     } catch (e) {
       showError("could not load state: " + e.message);
@@ -292,13 +343,29 @@
   bind("rs-ping-boat", () => pingEnd("boat"));
   bind("rs-ping-pin", () => pingEnd("pin"));
 
+  // Instrument Timer toggle — does not return a full state snapshot,
+  // so refresh state separately after toggling.
+  if (instrToggleEl && isWriter) {
+    instrToggleEl.addEventListener("click", async () => {
+      const instr = snapshot && snapshot.simrad_timer;
+      const currentlyOn = instr && instr.instrument_timer_on;
+      showError("");
+      try {
+        await postJSON("/api/race-start/instrument-timer", { on: !currentlyOn });
+        await refreshState();
+      } catch (e) {
+        showError(e.message);
+      }
+    });
+  }
+
   // Local clock tick at 4 Hz; reconcile from server every 2 s so that
   // arm / sync / ping / postpone fired from one device shows up on
   // every other device almost immediately (#644). This is a polling
   // fallback — a WebSocket broadcast would be cheaper at scale, but at
   // 2 s × handful of devices the load is negligible and the flow is
   // robust to disconnect.
-  setInterval(renderClock, 250);
+  setInterval(() => { renderClock(); renderInstrTimer(); }, 250);
   // Tick the scheduled-start countdown alongside the main clock so the
   // helm sees the seconds drop without waiting for the 2 s state poll.
   setInterval(renderScheduledStart, 1000);

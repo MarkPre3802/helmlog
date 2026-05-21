@@ -268,6 +268,7 @@ async def _build_snapshot(request: Request, state: SequenceState) -> dict[str, A
         "line_metrics": metrics_payload,
         "race_id": race_id,
         "scheduled_start": await _scheduled_start_payload(storage),
+        "simrad_timer": await _simrad_timer_payload(storage),
     }
 
 
@@ -293,6 +294,58 @@ async def _scheduled_start_payload(storage: Storage) -> dict[str, Any] | None:
         "session_type": row["session_type"],
         "seconds_until_start": seconds_until,
     }
+
+
+async def _simrad_timer_payload(storage: Storage) -> dict[str, Any]:
+    """Return the current Simrad timer state for inclusion in the snapshot."""
+    row = await storage.get_simrad_timer_state()
+    if row is None:
+        return {
+            "instrument_timer_on": False,
+            "duration_s": None,
+            "t0_utc": None,
+            "stopped_remaining_s": None,
+            "is_running": False,
+        }
+    return {
+        "instrument_timer_on": row["instrument_timer_on"],
+        "duration_s": row["duration_s"],
+        "t0_utc": row["t0_utc"],
+        "stopped_remaining_s": row["stopped_remaining_s"],
+        "is_running": row["is_running"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Instrument Timer toggle (crew)
+# ---------------------------------------------------------------------------
+
+
+class InstrumentTimerRequest(BaseModel):
+    on: bool
+
+
+@router.post("/api/race-start/instrument-timer")
+async def api_instrument_timer(
+    request: Request,
+    body: InstrumentTimerRequest,
+    user: dict[str, Any] = Depends(require_auth("crew")),  # noqa: B008
+) -> JSONResponse:
+    storage: Storage = get_storage(request)
+    row = await storage.get_simrad_timer_state()
+    if row is None and not body.on:
+        return JSONResponse({"ok": True})
+    now = _now_utc(request)
+    await storage.upsert_simrad_timer_state(
+        instrument_timer_on=body.on,
+        duration_s=row["duration_s"] if row else None,
+        t0_utc=row["t0_utc"] if row else None,
+        stopped_remaining_s=row["stopped_remaining_s"] if row else None,
+        is_running=bool(row["is_running"]) if row else False,
+        now_utc=now,
+    )
+    await audit(request, user, "instrument_timer_toggle", {"on": body.on})
+    return JSONResponse({"ok": True})
 
 
 # ---------------------------------------------------------------------------

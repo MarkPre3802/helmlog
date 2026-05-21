@@ -472,7 +472,66 @@ async def _run() -> None:
             deploy_task = asyncio.create_task(asyncio.sleep(1e9))
         try:
             if data_source == "signalk":
-                from helmlog.sk_reader import SKReader, SKReaderConfig
+                from helmlog.sk_reader import SKReader, SKReaderConfig, TimerDelta
+                from helmlog.simrad_timer import (
+                    SimradTimerState,
+                    handle_duration,
+                    handle_nearest_minute,
+                    handle_reset,
+                    handle_running,
+                    handle_stopped,
+                )
+
+                _SK_TIMER_STATE = "racing.startTimer.state"
+                _SK_TIMER_DURATION = "racing.startTimer.duration"
+
+                async def _handle_timer_delta(td: TimerDelta) -> None:
+                    row = await storage.get_simrad_timer_state()
+                    state = (
+                        SimradTimerState(
+                            instrument_timer_on=row["instrument_timer_on"],
+                            duration_s=row["duration_s"],
+                            t0_utc=(
+                                datetime.fromisoformat(row["t0_utc"])
+                                if row["t0_utc"]
+                                else None
+                            ),
+                            stopped_remaining_s=row["stopped_remaining_s"],
+                            is_running=row["is_running"],
+                        )
+                        if row
+                        else SimradTimerState()
+                    )
+
+                    if td.path == _SK_TIMER_DURATION:
+                        state = handle_duration(state, duration_s=int(td.value), nmea_ts=td.nmea_ts)
+                    elif td.value == "running":
+                        try:
+                            state = handle_running(state, nmea_ts=td.nmea_ts)
+                        except ValueError:
+                            logger.warning("Simrad timer: START received but no duration set — ignoring")
+                            return
+                        # Create a race if no race is currently open.
+                        current = await storage.get_current_race()
+                        if current is None:
+                            race_name = td.nmea_ts.strftime("%Y-%m-%d %H:%M")
+                            await storage.start_race(name=race_name)
+                            logger.info("Simrad timer: auto-created race {!r}", race_name)
+                    elif td.value == "stopped":
+                        state = handle_stopped(state, nmea_ts=td.nmea_ts)
+                    elif td.value == "reset":
+                        state = handle_reset(state, nmea_ts=td.nmea_ts)
+                    elif td.value == "nearest-minute":
+                        state = handle_nearest_minute(state, nmea_ts=td.nmea_ts)
+
+                    await storage.upsert_simrad_timer_state(
+                        instrument_timer_on=state.instrument_timer_on,
+                        duration_s=state.duration_s,
+                        t0_utc=state.t0_utc,
+                        stopped_remaining_s=state.stopped_remaining_s,
+                        is_running=state.is_running,
+                        now_utc=td.nmea_ts,
+                    )
 
                 sk_config = SKReaderConfig()
                 logger.info(
@@ -481,7 +540,7 @@ async def _run() -> None:
                     sk_config.port,
                     storage_config.db_path,
                 )
-                async for record in SKReader(sk_config):
+                async for record in SKReader(sk_config, on_timer_delta=_handle_timer_delta):
                     storage.update_live(record)
                     if storage.session_active:
                         await storage.write(record)

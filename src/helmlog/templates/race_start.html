@@ -33,6 +33,19 @@
   .rs-error { color: var(--danger, #b91c1c); text-align: center; min-height: 1.5rem; }
   .rs-readonly { text-align: center; padding: .5rem; background: var(--warning, #fef3c7);
                   color: #78350f; border-radius: .25rem; font-size: .85rem; }
+  .rs-instr { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; }
+  .rs-instr-header { display: flex; align-items: center; justify-content: space-between;
+                     margin-bottom: .5rem; }
+  .rs-instr-header h3 { margin: 0; font-size: .9rem; text-transform: uppercase;
+                        letter-spacing: .08em; color: var(--text-muted); }
+  .rs-instr-toggle { padding: .35rem .9rem; font-size: .85rem; font-weight: 600;
+                     border-radius: .35rem; border: 1px solid var(--border);
+                     background: var(--bg-elev); color: var(--text-primary); cursor: pointer; }
+  .rs-instr-toggle.active { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
+  .rs-instr-toggle:disabled { opacity: .4; cursor: not-allowed; }
+  .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
+  .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
+  .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
 </style>
 {% endblock %}
 
@@ -107,6 +120,16 @@
         <dt>Time to line</dt><dd id="rs-line-time">—</dd>
       </dl>
     </div>
+  </div>
+
+  <!-- Instrument Timer panel — shows B&G timer state; toggle requires crew -->
+  <div class="rs-instr" id="rs-instr-panel">
+    <div class="rs-instr-header">
+      <h3>Instrument Timer (B&amp;G)</h3>
+      <button id="rs-instr-toggle" class="rs-instr-toggle"
+              {% if not is_writer %}disabled{% endif %}>—</button>
+    </div>
+    <div class="rs-instr-status" id="rs-instr-status">No data received</div>
   </div>
 
   <div class="rs-error" id="rs-error"></div>

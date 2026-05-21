@@ -2120,6 +2120,20 @@ _MIGRATIONS: dict[int, str] = {
         );
         INSERT OR IGNORE INTO llm_consent (id, acknowledged) VALUES (1, 0);
     """,
+    86: """
+        -- Simrad race timer state (simradtimerintegration.md).
+        -- Singleton row (id=1) persisting the instrument-driven timer so
+        -- the race-start page reflects the B&G instrument in real time.
+        CREATE TABLE IF NOT EXISTS simrad_timer_state (
+            id                   INTEGER PRIMARY KEY CHECK (id = 1),
+            instrument_timer_on  INTEGER NOT NULL DEFAULT 0,
+            duration_s           INTEGER,
+            t0_utc               TEXT,
+            stopped_remaining_s  REAL,
+            is_running           INTEGER NOT NULL DEFAULT 0,
+            updated_at           TEXT NOT NULL
+        );
+    """,
 }
 
 # Retention window for retired slugs (#449). Requests for a retired slug 301
@@ -4573,6 +4587,65 @@ class Storage:
         """Drop the singleton state row (back to idle)."""
         db = self._conn()
         await db.execute("DELETE FROM race_start_state WHERE id = 1")
+        await db.commit()
+
+    # ------------------------------------------------------------------
+    # Simrad timer state (migration 86)
+    # ------------------------------------------------------------------
+
+    async def get_simrad_timer_state(self) -> dict[str, Any] | None:
+        """Return the singleton simrad timer state row as a dict, or None."""
+        db = self._read_conn()
+        cur = await db.execute(
+            "SELECT instrument_timer_on, duration_s, t0_utc,"
+            "       stopped_remaining_s, is_running, updated_at"
+            "  FROM simrad_timer_state WHERE id = 1"
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "instrument_timer_on": bool(row[0]),
+            "duration_s": row[1],
+            "t0_utc": row[2],
+            "stopped_remaining_s": row[3],
+            "is_running": bool(row[4]),
+            "updated_at": row[5],
+        }
+
+    async def upsert_simrad_timer_state(
+        self,
+        *,
+        instrument_timer_on: bool,
+        duration_s: int | None,
+        t0_utc: datetime | None,
+        stopped_remaining_s: float | None,
+        is_running: bool,
+        now_utc: datetime,
+    ) -> None:
+        """Upsert the singleton simrad timer state row."""
+        db = self._conn()
+        await db.execute(
+            "INSERT INTO simrad_timer_state"
+            " (id, instrument_timer_on, duration_s, t0_utc,"
+            "  stopped_remaining_s, is_running, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET"
+            "   instrument_timer_on=excluded.instrument_timer_on,"
+            "   duration_s=excluded.duration_s,"
+            "   t0_utc=excluded.t0_utc,"
+            "   stopped_remaining_s=excluded.stopped_remaining_s,"
+            "   is_running=excluded.is_running,"
+            "   updated_at=excluded.updated_at",
+            (
+                int(instrument_timer_on),
+                duration_s,
+                t0_utc.isoformat() if t0_utc else None,
+                stopped_remaining_s,
+                int(is_running),
+                now_utc.isoformat(),
+            ),
+        )
         await db.commit()
 
     # ------------------------------------------------------------------
