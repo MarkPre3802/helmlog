@@ -260,13 +260,21 @@ async def run(channel: str, publisher: HelmLogPublisher) -> None:
     buf = FastPacketBuffer()
 
     bus = can.Bus(channel=channel, interface="socketcan")
-    reader = can.AsyncBufferedReader()
-    notifier = can.Notifier(bus, [reader])
+    loop = asyncio.get_running_loop()
 
     log.info("Listening on %s  target PGNs: %s", channel, sorted(TARGET_PGNS))
 
     try:
-        async for msg in reader:
+        while True:
+            # bus.recv() is blocking; run it in the thread pool so the event
+            # loop stays free for the httpx publishes happening concurrently.
+            # can.Notifier + AsyncBufferedReader require the running loop to be
+            # passed explicitly in Python 3.10+; this approach avoids that
+            # fragility entirely.
+            msg: can.Message | None = await loop.run_in_executor(None, bus.recv, 1.0)
+            if msg is None:
+                continue
+
             if not msg.is_extended_id:
                 continue
 
@@ -304,9 +312,7 @@ async def run(channel: str, publisher: HelmLogPublisher) -> None:
 
             if event is not None:
                 await publisher.publish(event)
-
     finally:
-        notifier.stop()
         bus.shutdown()
         log.info("CAN bus closed")
 
