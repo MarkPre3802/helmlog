@@ -157,6 +157,7 @@ def create_app(
         "/auth/reset-password",
         "/auth/forgot-password",
         "/static",
+        "/api/internal/timer-event",
     }
 
     @app.middleware("http")
