@@ -295,7 +295,14 @@ async def run(channel: str, publisher: SignalKPublisher) -> None:
 
             log.debug("PGN %d  SA 0x%02X  payload: %s", pgn, sa, payload.hex(" "))
 
-            ts = datetime.now(UTC)
+            # Use the kernel CAN frame timestamp (set at hardware receive time)
+            # rather than datetime.now() which is captured after any previous
+            # async publish and may be seconds late if the event loop was busy.
+            ts = (
+                datetime.fromtimestamp(msg.timestamp, tz=UTC)
+                if msg.timestamp
+                else datetime.now(UTC)
+            )
             event: TimerEvent | None = None
 
             if pgn == PGN_START_STOP:
