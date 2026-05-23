@@ -21,14 +21,13 @@
   const instrStatusEl = document.getElementById("rs-instr-status");
 
   let snapshot = null;
-  let clockSkewMs = 0; // browser ms - server ms; corrects Pi/browser clock divergence
 
   // Virtual-now matches the server's clock (real + simulator offset).
-  // clockSkewMs compensates for Pi/browser clock divergence (e.g. Pi NTP drift).
-  // sim_offset_s is non-zero only when the race-start simulator is active.
+  // In production sim_offset_s is always 0; in the simulator it's whatever
+  // the harness has set, so display + sync stay in sync with the FSM.
   function virtualNowMs() {
     const offset = snapshot && snapshot.sim_offset_s ? snapshot.sim_offset_s : 0;
-    return Date.now() - clockSkewMs + offset * 1000;
+    return Date.now() + offset * 1000;
   }
 
   function showError(msg) {
@@ -267,9 +266,6 @@
         throw new Error(data.detail || "HTTP " + r.status);
       }
       snapshot = await r.json();
-      if (snapshot.now_utc) {
-        clockSkewMs = Date.now() - new Date(snapshot.now_utc).getTime();
-      }
       renderPhase();
       renderFlags();
       renderClock();
