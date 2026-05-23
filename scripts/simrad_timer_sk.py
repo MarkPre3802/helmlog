@@ -46,16 +46,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 import can
+import httpx
 
 log = logging.getLogger(__name__)
 
@@ -197,19 +195,27 @@ def decode_set_timer(payload: bytes) -> int | None:
 class HelmLogPublisher:
     """Posts timer events directly to HelmLog, bypassing Signal K.
 
-    Using urllib (stdlib) in asyncio.to_thread avoids adding dependencies.
-    Timeout is intentionally short — this is a loopback call on the same Pi.
+    Uses httpx.AsyncClient with a persistent connection so back-to-back
+    events (e.g. SET immediately followed by START) don't each pay TCP
+    connection-setup overhead.  The client is opened/closed via the async
+    context manager.
     """
 
     def __init__(self, base_url: str, token: str = "") -> None:
         self._url = base_url.rstrip("/") + "/api/internal/timer-event"
-        self._token = token
+        self._headers: dict[str, str] = {}
+        if token:
+            self._headers["Authorization"] = f"Bearer {token}"
+        self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> "HelmLogPublisher":
+        self._client = httpx.AsyncClient(timeout=2.0)
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        pass
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     async def publish(self, event: TimerEvent) -> None:
         ts = (
@@ -234,15 +240,16 @@ class HelmLogPublisher:
             log.info("Timer NEAREST MINUTE")
 
     async def _post(self, path: str, value: object, ts: str) -> None:
-        body = json.dumps({"path": path, "value": value, "ts": ts}).encode()
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        req = urllib.request.Request(self._url, data=body, headers=headers, method="POST")
+        assert self._client is not None, "use as async context manager"
         try:
-            await asyncio.to_thread(urllib.request.urlopen, req, None, 2)
-            log.debug("POST %s = %s", path, value)
-        except urllib.error.URLError as exc:
+            r = await self._client.post(
+                self._url,
+                json={"path": path, "value": value, "ts": ts},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            log.debug("POST %s = %s  (%d ms)", path, value, r.elapsed.microseconds // 1000)
+        except httpx.HTTPError as exc:
             log.warning("HelmLog POST failed  path=%s  error=%s", path, exc)
 
 
