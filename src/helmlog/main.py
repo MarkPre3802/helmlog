@@ -486,11 +486,6 @@ async def _run() -> None:
                 _SK_TIMER_DURATION = "racing.startTimer.duration"
 
                 async def _handle_timer_delta(td: TimerDelta) -> None:
-                    # Use wall-clock time at point of processing, not td.nmea_ts.
-                    # SK delta timestamps reflect when the SK server received the
-                    # message and can lag the actual CAN event by 3-6 s due to
-                    # SK queuing. Wall clock on the same Pi is accurate to <100 ms.
-                    now = datetime.now(UTC)
                     row = await storage.get_simrad_timer_state()
                     state = (
                         SimradTimerState(
@@ -509,10 +504,10 @@ async def _run() -> None:
                     )
 
                     if td.path == _SK_TIMER_DURATION:
-                        state = handle_duration(state, duration_s=int(td.value), nmea_ts=now)
+                        state = handle_duration(state, duration_s=int(td.value), nmea_ts=td.nmea_ts)
                     elif td.value == "running":
                         try:
-                            state = handle_running(state, nmea_ts=now)
+                            state = handle_running(state, nmea_ts=td.nmea_ts)
                         except ValueError:
                             logger.warning("Simrad timer: START received but no duration set — ignoring")
                             return
@@ -524,16 +519,17 @@ async def _run() -> None:
                             today = local_today()
                             date_str = today.isoformat()
                             session_type = "race"
+                            now_utc = datetime.now(UTC)
                             race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
-                            race_name = now.strftime("%Y-%m-%d %H:%M")
-                            await storage.start_race("", now, date_str, race_num, race_name, session_type)
+                            race_name = td.nmea_ts.strftime("%Y-%m-%d %H:%M")
+                            await storage.start_race("", now_utc, date_str, race_num, race_name, session_type)
                             logger.info("Simrad timer: auto-created race {!r}", race_name)
                     elif td.value == "stopped":
-                        state = handle_stopped(state, nmea_ts=now)
+                        state = handle_stopped(state, nmea_ts=td.nmea_ts)
                     elif td.value == "reset":
-                        state = handle_reset(state, nmea_ts=now)
+                        state = handle_reset(state, nmea_ts=td.nmea_ts)
                     elif td.value == "nearest-minute":
-                        state = handle_nearest_minute(state, nmea_ts=now)
+                        state = handle_nearest_minute(state, nmea_ts=td.nmea_ts)
 
                     await storage.upsert_simrad_timer_state(
                         instrument_timer_on=state.instrument_timer_on,
@@ -541,7 +537,7 @@ async def _run() -> None:
                         t0_utc=state.t0_utc,
                         stopped_remaining_s=state.stopped_remaining_s,
                         is_running=state.is_running,
-                        now_utc=now,
+                        now_utc=td.nmea_ts,
                     )
 
                 sk_config = SKReaderConfig()
