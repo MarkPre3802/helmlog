@@ -48,14 +48,14 @@ import argparse
 import asyncio
 import json
 import logging
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
 import can
-from websockets.asyncio.client import ClientConnection
-from websockets.asyncio.client import connect as _ws_connect
 
 log = logging.getLogger(__name__)
 
@@ -191,85 +191,65 @@ def decode_set_timer(payload: bytes) -> int | None:
     return int(payload[10])
 
 
-# ── Signal K publisher ────────────────────────────────────────────────────────
+# ── HelmLog direct publisher ──────────────────────────────────────────────────
 
 
-class SignalKPublisher:
-    """Publishes timer events to Signal K via WebSocket delta messages."""
+class HelmLogPublisher:
+    """Posts timer events directly to HelmLog, bypassing Signal K.
 
-    def __init__(self, base_url: str, vessel: str = "self", token: str = "") -> None:
-        ws_base = base_url.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
-        qs = "?subscribe=none" + (f"&token={token}" if token else "")
-        self._uri = ws_base + "/signalk/v1/stream" + qs
-        self._vessel = vessel
-        self._ws: ClientConnection | None = None
+    Using urllib (stdlib) in asyncio.to_thread avoids adding dependencies.
+    Timeout is intentionally short — this is a loopback call on the same Pi.
+    """
 
-    async def __aenter__(self) -> SignalKPublisher:
-        await self._connect()
+    def __init__(self, base_url: str, token: str = "") -> None:
+        self._url = base_url.rstrip("/") + "/api/internal/timer-event"
+        self._token = token
+
+    async def __aenter__(self) -> "HelmLogPublisher":
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
-
-    async def _connect(self) -> None:
-        self._ws = await _ws_connect(self._uri)
-        log.info("Connected to Signal K WebSocket: %s", self._uri)
+        pass
 
     async def publish(self, event: TimerEvent) -> None:
-        ts = event.timestamp.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        ts = (
+            event.timestamp.strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{event.timestamp.microsecond // 1000:03d}Z"
+        )
 
         if event.action is TimerAction.SET:
-            await self._send(SK_PATH_DURATION, (event.minutes or 0) * 60, ts)
+            await self._post(SK_PATH_DURATION, (event.minutes or 0) * 60, ts)
             log.info("SET timer → %d min", event.minutes)
-
         elif event.action is TimerAction.START:
-            await self._send(SK_PATH_STATE, "running", ts)
+            await self._post(SK_PATH_STATE, "running", ts)
             log.info("Timer STARTED")
-
         elif event.action is TimerAction.STOP:
-            await self._send(SK_PATH_STATE, "stopped", ts)
+            await self._post(SK_PATH_STATE, "stopped", ts)
             log.info("Timer STOPPED")
-
         elif event.action is TimerAction.RESET:
-            await self._send(SK_PATH_STATE, "reset", ts)
+            await self._post(SK_PATH_STATE, "reset", ts)
             log.info("Timer RESET")
-
         elif event.action is TimerAction.NEAREST_MINUTE:
-            await self._send(SK_PATH_STATE, "nearest-minute", ts)
+            await self._post(SK_PATH_STATE, "nearest-minute", ts)
             log.info("Timer NEAREST MINUTE")
 
-    async def _send(self, sk_path: str, value: object, timestamp: str) -> None:
-        if self._ws is None:
-            try:
-                await self._connect()
-            except Exception as exc:
-                log.warning("Signal K reconnect failed: %s", exc)
-                return
-        assert self._ws is not None
-        delta: dict[str, Any] = {
-            "context": f"vessels.{self._vessel}",
-            "updates": [
-                {
-                    "source": {"label": "simrad-timer", "type": "NMEA2000"},
-                    "timestamp": timestamp,
-                    "values": [{"path": sk_path, "value": value}],
-                }
-            ],
-        }
+    async def _post(self, path: str, value: object, ts: str) -> None:
+        body = json.dumps({"path": path, "value": value, "ts": ts}).encode()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        req = urllib.request.Request(self._url, data=body, headers=headers, method="POST")
         try:
-            await self._ws.send(json.dumps(delta))
-            log.debug("WS delta  %-45s = %s", sk_path, value)
-        except Exception as exc:
-            log.warning("Signal K send failed  path=%s  error=%s", sk_path, exc)
-            self._ws = None
+            await asyncio.to_thread(urllib.request.urlopen, req, None, 2)
+            log.debug("POST %s = %s", path, value)
+        except urllib.error.URLError as exc:
+            log.warning("HelmLog POST failed  path=%s  error=%s", path, exc)
 
 
 # ── CAN reader ────────────────────────────────────────────────────────────────
 
 
-async def run(channel: str, publisher: SignalKPublisher) -> None:
+async def run(channel: str, publisher: HelmLogPublisher) -> None:
     buf = FastPacketBuffer()
 
     bus = can.Bus(channel=channel, interface="socketcan")
@@ -335,21 +315,16 @@ def main() -> None:
         help="CAN interface name  (default: can0)",
     )
     ap.add_argument(
-        "--signalk",
-        default="http://localhost:3000",
-        help="Signal K server base URL  (default: http://localhost:3000)",
-    )
-    ap.add_argument(
-        "--vessel",
-        default="self",
-        help="Signal K vessel context  (default: self)",
+        "--helmlog",
+        default="http://localhost:3002",
+        help="HelmLog base URL  (default: http://localhost:3002)",
     )
     ap.add_argument(
         "--token",
         default="",
         nargs="?",
         const="",
-        help="Signal K bearer token (from SK Admin → Security → Access Requests)",
+        help="Bearer token matching HELMLOG_TIMER_TOKEN in HelmLog .env (optional)",
     )
     ap.add_argument(
         "--log-level",
@@ -365,7 +340,7 @@ def main() -> None:
     )
 
     async def amain() -> None:
-        async with SignalKPublisher(args.signalk, args.vessel, args.token) as pub:
+        async with HelmLogPublisher(args.helmlog, args.token) as pub:
             await run(args.channel, pub)
 
     asyncio.run(amain())

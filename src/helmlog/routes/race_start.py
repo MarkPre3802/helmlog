@@ -8,6 +8,7 @@ from the snapshot returned by ``GET /api/race-start/state``.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -314,6 +315,99 @@ async def _simrad_timer_payload(storage: Storage) -> dict[str, Any]:
         "stopped_remaining_s": row["stopped_remaining_s"],
         "is_running": row["is_running"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Internal timer event — called directly by simrad_timer_sk.py bridge
+# Bypasses Signal K to eliminate SK queuing latency (~8 s observed).
+# Auth: optional bearer token via HELMLOG_TIMER_TOKEN env var.
+# ---------------------------------------------------------------------------
+
+
+class _InternalTimerEventRequest(BaseModel):
+    path: str
+    value: str | int
+    ts: str  # ISO-8601 UTC from bridge hardware CAN timestamp
+
+
+_SK_TIMER_STATE_PATH = "racing.startTimer.state"
+_SK_TIMER_DURATION_PATH = "racing.startTimer.duration"
+_TIMER_STATE_VALUES = frozenset({"running", "stopped", "reset", "nearest-minute"})
+
+
+@router.post("/api/internal/timer-event")
+async def api_internal_timer_event(
+    request: Request,
+    body: _InternalTimerEventRequest,
+) -> JSONResponse:
+    token = os.environ.get("HELMLOG_TIMER_TOKEN", "")
+    if token:
+        auth = request.headers.get("Authorization", "")
+        if auth != f"Bearer {token}":
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    try:
+        nmea_ts = datetime.fromisoformat(body.ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        nmea_ts = datetime.now(UTC)
+
+    from helmlog.simrad_timer import (
+        SimradTimerState,
+        handle_duration,
+        handle_nearest_minute,
+        handle_reset,
+        handle_running,
+        handle_stopped,
+    )
+
+    storage: Storage = get_storage(request)
+    row = await storage.get_simrad_timer_state()
+    state = (
+        SimradTimerState(
+            instrument_timer_on=row["instrument_timer_on"],
+            duration_s=row["duration_s"],
+            t0_utc=datetime.fromisoformat(row["t0_utc"]) if row["t0_utc"] else None,
+            stopped_remaining_s=row["stopped_remaining_s"],
+            is_running=bool(row["is_running"]),
+        )
+        if row
+        else SimradTimerState()
+    )
+
+    if body.path == _SK_TIMER_DURATION_PATH:
+        state = handle_duration(state, duration_s=int(body.value), nmea_ts=nmea_ts)
+    elif body.value == "running":
+        try:
+            state = handle_running(state, nmea_ts=nmea_ts)
+        except ValueError:
+            return JSONResponse({"ok": False, "error": "no duration set"}, status_code=400)
+        current = await storage.get_current_race()
+        if current is None:
+            from helmlog.races import local_today
+            today = local_today()
+            date_str = today.isoformat()
+            session_type = "race"
+            race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
+            race_name = nmea_ts.strftime("%Y-%m-%d %H:%M")
+            await storage.start_race("", nmea_ts, date_str, race_num, race_name, session_type)
+    elif body.value == "stopped":
+        state = handle_stopped(state, nmea_ts=nmea_ts)
+    elif body.value == "reset":
+        state = handle_reset(state, nmea_ts=nmea_ts)
+    elif body.value == "nearest-minute":
+        state = handle_nearest_minute(state, nmea_ts=nmea_ts)
+    else:
+        return JSONResponse({"ok": False, "error": f"unknown value {body.value!r}"}, status_code=400)
+
+    await storage.upsert_simrad_timer_state(
+        instrument_timer_on=state.instrument_timer_on,
+        duration_s=state.duration_s,
+        t0_utc=state.t0_utc,
+        stopped_remaining_s=state.stopped_remaining_s,
+        is_running=state.is_running,
+        now_utc=nmea_ts,
+    )
+    return JSONResponse({"ok": True})
 
 
 # ---------------------------------------------------------------------------
