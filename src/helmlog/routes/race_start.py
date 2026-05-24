@@ -392,6 +392,9 @@ async def api_internal_timer_event(
             await storage.start_race("", nmea_ts, date_str, race_num, race_name, session_type)
     elif body.value == "stopped":
         state = handle_stopped(state, nmea_ts=nmea_ts)
+        current = await storage.get_current_race()
+        if current is not None:
+            await storage.end_race(current.id, nmea_ts)
     elif body.value == "reset":
         state = handle_reset(state, nmea_ts=nmea_ts)
     elif body.value == "nearest-minute":

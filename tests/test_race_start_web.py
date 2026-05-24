@@ -632,3 +632,57 @@ async def test_state_persists_across_clients(storage: Storage) -> None:
     body = r.json()
     assert body["phase"] in {"armed", "counting_down"}
     assert body["kind"] == "5-4-1-0"
+
+
+# ---------------------------------------------------------------------------
+# Simrad timer events
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_simrad_stopped_ends_current_race(storage: Storage) -> None:
+    """STOP from the B&G closes the current open race."""
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    app = create_app(storage)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # SET duration then START (creates race automatically).
+        await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.duration", "value": 300, "ts": ts},
+        )
+        r = await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.state", "value": "running", "ts": ts},
+        )
+        assert r.status_code == 200
+        assert await storage.get_current_race() is not None
+
+        # STOP should end the race.
+        r = await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.state", "value": "stopped", "ts": ts},
+        )
+        assert r.status_code == 200
+
+    assert await storage.get_current_race() is None
+
+
+@pytest.mark.asyncio
+async def test_simrad_stopped_with_no_race_is_noop(storage: Storage) -> None:
+    """STOP with no open race does not error."""
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    app = create_app(storage)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.duration", "value": 300, "ts": ts},
+        )
+        r = await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.state", "value": "stopped", "ts": ts},
+        )
+    assert r.status_code == 200
