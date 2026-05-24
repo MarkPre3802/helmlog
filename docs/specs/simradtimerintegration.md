@@ -18,7 +18,7 @@ START (no open race): also create a race named <DATE TIME>.
 
 The HelmLog timer will count down the time remaining and show it on the Start page, which is assumed to be open at all times during racing.
 
-WHEN `racing.startTimer.state = "stopped"` is received, HelmLog SHALL stop the timer and persist stopped_remaining_s until "reset" is received or duration is updated.
+WHEN `racing.startTimer.state = "stopped"` is received, HelmLog SHALL stop the timer, persist stopped_remaining_s until "reset" is received or duration is updated, and finish the current open race (set its end_utc to the NMEA timestamp). If no race is in progress the finish is a no-op.
 
 WHEN `racing.startTimer.state = "reset"` is received, HelmLog SHALL reset the timer to the stored duration. "reset" will not change the running state of the timer — if running it will continue to run, if stopped it will remain stopped.
 
