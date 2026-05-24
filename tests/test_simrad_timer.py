@@ -1,13 +1,11 @@
-"""Tests for scripts/simrad_timer_sk.py — decoder logic and SK publish behaviour."""
+"""Tests for scripts/simrad_timer_sk.py — decoder logic and HelmLog publish behaviour."""
 
 from __future__ import annotations
 
-import json
 import sys
-import types
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -73,18 +71,23 @@ class TestDecodeSetTimer:
 
 # ── publisher tests ───────────────────────────────────────────────────────────
 
-def _make_publisher() -> tuple[sut.SignalKPublisher, AsyncMock]:
-    """Return a publisher wired to a mock WebSocket."""
-    pub = sut.SignalKPublisher.__new__(sut.SignalKPublisher)
-    pub._vessel = "self"  # type: ignore[attr-defined]
-    mock_ws = AsyncMock()
-    pub._ws = mock_ws  # type: ignore[attr-defined]
-    return pub, mock_ws
+def _make_publisher() -> tuple[sut.HelmLogPublisher, AsyncMock]:
+    """Return a HelmLogPublisher wired to a mock httpx.AsyncClient."""
+    pub = sut.HelmLogPublisher.__new__(sut.HelmLogPublisher)
+    pub._url = "http://test/api/internal/timer-event"  # type: ignore[attr-defined]
+    pub._headers = {}  # type: ignore[attr-defined]
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.elapsed = MagicMock()
+    mock_response.elapsed.microseconds = 0
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    pub._client = mock_client  # type: ignore[attr-defined]
+    return pub, mock_client
 
 
-def _sent_delta(mock_ws: AsyncMock) -> dict:
-    raw = mock_ws.send.call_args[0][0]
-    return json.loads(raw)
+def _posted_body(mock_client: AsyncMock) -> dict:
+    return mock_client.post.call_args.kwargs["json"]
 
 
 def _ts() -> datetime:
@@ -93,59 +96,59 @@ def _ts() -> datetime:
 
 @pytest.mark.asyncio
 async def test_publish_start_sends_running() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.START, minutes=None, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_STATE, "value": "running"} in values
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_STATE
+    assert body["value"] == "running"
 
 
 @pytest.mark.asyncio
 async def test_publish_stop_sends_stopped() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.STOP, minutes=None, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_STATE, "value": "stopped"} in values
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_STATE
+    assert body["value"] == "stopped"
 
 
 @pytest.mark.asyncio
 async def test_publish_nearest_minute_sends_state() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.NEAREST_MINUTE, minutes=None, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_STATE, "value": "nearest-minute"} in values
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_STATE
+    assert body["value"] == "nearest-minute"
 
 
 @pytest.mark.asyncio
 async def test_publish_reset_sends_state() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.RESET, minutes=None, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_STATE, "value": "reset"} in values
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_STATE
+    assert body["value"] == "reset"
 
 
 @pytest.mark.asyncio
 async def test_publish_set_sends_duration_in_seconds() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.SET, minutes=5, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_DURATION, "value": 300} in values  # 5 min × 60
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_DURATION
+    assert body["value"] == 300  # 5 min × 60
 
 
 @pytest.mark.asyncio
 async def test_publish_set_6_minutes() -> None:
-    pub, ws = _make_publisher()
+    pub, client = _make_publisher()
     event = sut.TimerEvent(action=sut.TimerAction.SET, minutes=6, timestamp=_ts())
     await pub.publish(event)
-    delta = _sent_delta(ws)
-    values = delta["updates"][0]["values"]
-    assert {"path": sut.SK_PATH_DURATION, "value": 360} in values  # 6 min × 60
+    body = _posted_body(client)
+    assert body["path"] == sut.SK_PATH_DURATION
+    assert body["value"] == 360  # 6 min × 60
