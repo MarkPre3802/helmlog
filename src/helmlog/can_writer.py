@@ -70,15 +70,16 @@ class CANWriter:
 
     def __init__(self, channel: str = "can0") -> None:
         self._channel = channel
-        self._bus: can.Bus | None = None
+        self._bus: can.BusABC | None = None
 
     async def start(self) -> None:
         """Open the CAN bus and claim our source address."""
         loop = asyncio.get_running_loop()
         try:
-            self._bus = await loop.run_in_executor(
+            bus: can.BusABC = await loop.run_in_executor(
                 None, lambda: can.Bus(channel=self._channel, interface="socketcan")
             )
+            self._bus = bus
         except Exception as exc:
             logger.warning(
                 "CANWriter: failed to open {} — B&G control unavailable ({})", self._channel, exc
