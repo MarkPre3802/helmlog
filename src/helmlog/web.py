@@ -44,6 +44,7 @@ def create_app(
     storage: Storage,
     recorder: AudioRecorder | AudioRecorderGroup | None = None,
     audio_config: AudioConfig | None = None,
+    can_writer: object | None = None,
 ) -> FastAPI:
     """Create and return the FastAPI application bound to the given Storage.
 
@@ -83,6 +84,7 @@ def create_app(
     app.state.storage = storage
     app.state.recorder = recorder
     app.state.audio_config = audio_config
+    app.state.can_writer = can_writer
     app.state.session_state = AppSessionState()
     app.state.startup_sha = STARTUP_SHA
     app.state.ws_clients = set()  # WebSocket client connections

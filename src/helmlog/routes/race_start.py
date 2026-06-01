@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from helmlog.storage import Storage
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -441,7 +443,36 @@ async def api_instrument_timer(
         is_running=bool(row["is_running"]) if row else False,
         now_utc=now,
     )
-    await audit(request, user, "instrument_timer_toggle", {"on": body.on})
+    await audit(request, "instrument_timer_toggle", detail=str(body.on), user=user)
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# B&G timer control — transmit commands to instruments via CAN (crew)
+# ---------------------------------------------------------------------------
+
+
+class BGTimerCommandRequest(BaseModel):
+    command: Literal["start", "stop", "reset", "nearest-minute", "set"]
+    minutes: int | None = Field(default=None, ge=1, le=60)
+
+
+@router.post("/api/race-start/bg-timer-command")
+async def api_bg_timer_command(
+    request: Request,
+    body: BGTimerCommandRequest,
+    user: dict[str, Any] = Depends(require_auth("crew")),  # noqa: B008
+) -> JSONResponse:
+    if body.command == "set" and body.minutes is None:
+        raise HTTPException(422, "minutes required for 'set'")
+    can_writer = getattr(request.app.state, "can_writer", None)
+    if can_writer is None:
+        raise HTTPException(503, "CAN writer not available")
+    try:
+        await can_writer.send(body.command, body.minutes)
+    except Exception as exc:
+        raise HTTPException(500, f"CAN send failed: {exc}") from exc
+    await audit(request, "bg_timer_command", detail=body.command, user=user)
     return JSONResponse({"ok": True})
 
 
