@@ -124,6 +124,7 @@ async def _web_loop(
     storage: object,
     recorder: object | None = None,
     audio_config: object | None = None,
+    can_writer: object | None = None,
 ) -> None:
     """Background task: serve the race-marking web interface on WEB_PORT (default 3002).
 
@@ -148,7 +149,7 @@ async def _web_loop(
         cfg = RaceConfig()
         server = uvicorn.Server(
             uvicorn.Config(
-                create_app(storage, _recorder, _audio_config),
+                create_app(storage, _recorder, _audio_config, can_writer),
                 host=cfg.web_host,
                 port=cfg.web_port,
                 log_level="warning",
@@ -456,7 +457,13 @@ async def _run() -> None:
             weather_task = asyncio.create_task(asyncio.sleep(1e9))  # no-op placeholder
             tide_task = asyncio.create_task(asyncio.sleep(1e9))
         aruco_task = asyncio.create_task(_aruco_poll_loop(storage))
-        web_task = asyncio.create_task(_web_loop(storage, recorder, audio_config))
+
+        from helmlog.can_writer import CANWriter
+
+        can_writer = CANWriter()
+        await can_writer.start()
+
+        web_task = asyncio.create_task(_web_loop(storage, recorder, audio_config, can_writer))
         monitor_task = asyncio.create_task(monitor_loop())
         # Eager re-enrichment of maneuver sessions whose cached payload is
         # behind the current ENRICH_CACHE_VERSION (#612 / #613). Runs once
@@ -572,6 +579,7 @@ async def _run() -> None:
         except asyncio.CancelledError:
             logger.info("Shutdown signal received — flushing and stopping")
         finally:
+            await can_writer.stop()
             aruco_task.cancel()
             weather_task.cancel()
             tide_task.cancel()

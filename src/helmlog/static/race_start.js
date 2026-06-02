@@ -370,6 +370,28 @@
   bind("rs-ping-boat", () => pingEnd("boat"));
   bind("rs-ping-pin", () => pingEnd("pin"));
 
+  // B&G timer control buttons — send commands directly to the instruments via CAN.
+  if (isWriter) {
+    async function bgCmd(command, minutes) {
+      showError("");
+      try {
+        const body = { command };
+        if (minutes !== undefined) body.minutes = minutes;
+        await postJSON("/api/race-start/bg-timer-command", body);
+      } catch (e) {
+        showError(e.message);
+      }
+    }
+    const bgStart = document.getElementById("rs-bg-start");
+    const bgStop  = document.getElementById("rs-bg-stop");
+    const bgReset = document.getElementById("rs-bg-reset");
+    const bgNear  = document.getElementById("rs-bg-nearest-min");
+    if (bgStart) bgStart.addEventListener("click", () => bgCmd("start"));
+    if (bgStop)  bgStop.addEventListener( "click", () => bgCmd("stop"));
+    if (bgReset) bgReset.addEventListener("click", () => bgCmd("reset"));
+    if (bgNear)  bgNear.addEventListener( "click", () => bgCmd("nearest-minute"));
+  }
+
   // Instrument Timer toggle — does not return a full state snapshot,
   // so refresh state separately after toggling.
   if (instrToggleEl && isWriter) {

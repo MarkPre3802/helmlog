@@ -46,6 +46,14 @@
   .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
   .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
   .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
+  .rs-instr-controls { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .6rem; }
+  .rs-instr-controls button { flex: 1 1 5rem; padding: .4rem .5rem; font-size: .85rem;
+                              font-weight: 600; border-radius: .35rem;
+                              border: 1px solid var(--border); background: var(--bg-elev);
+                              color: var(--text-primary); cursor: pointer; }
+  .rs-instr-controls button:disabled { opacity: .4; cursor: not-allowed; }
+  .rs-instr-controls button.primary { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
+  .rs-instr-controls button.danger  { background: var(--danger, #b91c1c); color: #fff; border-color: transparent; }
 
 </style>
 {% endblock %}
@@ -131,6 +139,12 @@
               {% if not is_writer %}disabled{% endif %}>—</button>
     </div>
     <div class="rs-instr-status" id="rs-instr-status">No data received</div>
+    <div class="rs-instr-controls">
+      <button id="rs-bg-start"        class="primary" {% if not is_writer %}disabled{% endif %}>Start</button>
+      <button id="rs-bg-stop"                         {% if not is_writer %}disabled{% endif %}>Stop</button>
+      <button id="rs-bg-reset"                        {% if not is_writer %}disabled{% endif %}>Reset</button>
+      <button id="rs-bg-nearest-min"                  {% if not is_writer %}disabled{% endif %}>Nearest min</button>
+    </div>
   </div>
 
   <div class="rs-error" id="rs-error"></div>
