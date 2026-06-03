@@ -11,6 +11,8 @@ from helmlog.nmea2000 import (
     PGN_COG_SOG_RAPID,
     PGN_ENVIRONMENTAL,
     PGN_POSITION_RAPID,
+    PGN_SIMRAD_SET_TIMER,
+    PGN_SIMRAD_START_STOP,
     PGN_SPEED_THROUGH_WATER,
     PGN_VESSEL_HEADING,
     PGN_WATER_DEPTH,
@@ -18,8 +20,10 @@ from helmlog.nmea2000 import (
     COGSOGRecord,
     DepthRecord,
     EnvironmentalRecord,
+    FastPacketBuffer,
     HeadingRecord,
     PositionRecord,
+    SimradTimerRecord,
     SpeedRecord,
     WindRecord,
     decode,
@@ -303,3 +307,155 @@ class TestUnitConversions:
         result = decode(PGN_ENVIRONMENTAL, data, 5, _UNIX_TS)
         assert isinstance(result, EnvironmentalRecord)
         assert abs(result.water_temp_c - 0.0) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# Simrad/B&G proprietary PGN decoders
+# ---------------------------------------------------------------------------
+
+_MFR = bytes([0x41, 0x9F])
+_SET_DISC = bytes([0x07, 0x42, 0x00, 0x01])
+
+
+def _start_stop_payload(cmd: int) -> bytes:
+    return _MFR + bytes([0xFF, 0xFF, 0x01, 0x17, cmd, 0x00, 0xFF, 0xFF, 0xFF, 0xFF])
+
+
+def _set_timer_payload(minutes: int) -> bytes:
+    return _MFR + bytes([0xFF, 0xFF, 0xFF, 0xFF]) + _SET_DISC + bytes([minutes, 0xFF, 0xFF, 0xFF])
+
+
+class TestDecode130850:
+    def test_start(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x3D), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "start"
+        assert result.minutes is None
+
+    def test_stop(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x3E), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "stop"
+
+    def test_nearest_minute(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x3F), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "nearest_minute"
+
+    def test_reset(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x40), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "reset"
+
+    def test_unknown_command_returns_none(self) -> None:
+        assert decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x00), 9, _UNIX_TS) is None
+
+    def test_wrong_manufacturer_returns_none(self) -> None:
+        bad = bytes([0x00, 0x00, 0xFF, 0xFF, 0x01, 0x17, 0x3D, 0x00])
+        assert decode(PGN_SIMRAD_START_STOP, bad, 9, _UNIX_TS) is None
+
+    def test_too_short_returns_none(self) -> None:
+        assert decode(PGN_SIMRAD_START_STOP, bytes([0x41, 0x9F, 0xFF]), 9, _UNIX_TS) is None
+
+    def test_source_addr_preserved(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x3D), 42, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.source_addr == 42
+
+
+class TestDecode130845:
+    def test_set_5_minutes(self) -> None:
+        result = decode(PGN_SIMRAD_SET_TIMER, _set_timer_payload(5), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "set"
+        assert result.minutes == 5
+
+    def test_set_10_minutes(self) -> None:
+        result = decode(PGN_SIMRAD_SET_TIMER, _set_timer_payload(10), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.minutes == 10
+
+    def test_broadcast_discriminator_ignored(self) -> None:
+        broadcast = _MFR + bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x00, 0x01, 0x9B, 0x09, 0x00, 0x00])
+        assert decode(PGN_SIMRAD_SET_TIMER, broadcast, 9, _UNIX_TS) is None
+
+    def test_wrong_manufacturer_returns_none(self) -> None:
+        bad = bytes([0x00, 0x00]) + bytes(12)
+        assert decode(PGN_SIMRAD_SET_TIMER, bad, 9, _UNIX_TS) is None
+
+    def test_too_short_returns_none(self) -> None:
+        assert decode(PGN_SIMRAD_SET_TIMER, bytes([0x41, 0x9F, 0xFF, 0xFF, 0xFF, 0xFF]), 9, _UNIX_TS) is None
+
+
+# ---------------------------------------------------------------------------
+# FastPacketBuffer
+# ---------------------------------------------------------------------------
+
+
+def _make_fast_packet(pgn: int, sa: int, payload: bytes, seq: int = 0) -> list[bytes]:
+    """Build the raw CAN frame bytes for a Fast Packet message."""
+    frames = []
+    total = len(payload)
+    # Frame 0: seq<<5 | 0, total, first 6 bytes of payload
+    chunk0 = payload[:6]
+    frames.append(bytes([(seq << 5) | 0, total]) + chunk0.ljust(6, b"\xff"))
+    offset = 6
+    frame_num = 1
+    while offset < total:
+        chunk = payload[offset : offset + 7]
+        frames.append(bytes([(seq << 5) | frame_num]) + chunk.ljust(7, b"\xff"))
+        offset += 7
+        frame_num += 1
+    return frames
+
+
+class TestFastPacketBuffer:
+    def test_single_frame_payload(self) -> None:
+        buf = FastPacketBuffer()
+        payload = bytes(range(6))  # fits in frame 0
+        frames = _make_fast_packet(PGN_SIMRAD_START_STOP, 9, payload)
+        result = buf.feed(PGN_SIMRAD_START_STOP, 9, frames[0])
+        assert result == payload
+
+    def test_multi_frame_reassembly(self) -> None:
+        buf = FastPacketBuffer()
+        payload = _start_stop_payload(0x3D)  # 12 bytes → 2 CAN frames
+        frames = _make_fast_packet(PGN_SIMRAD_START_STOP, 9, payload)
+        assert len(frames) == 2
+        assert buf.feed(PGN_SIMRAD_START_STOP, 9, frames[0]) is None
+        result = buf.feed(PGN_SIMRAD_START_STOP, 9, frames[1])
+        assert result == payload
+
+    def test_out_of_order_frame_discarded(self) -> None:
+        buf = FastPacketBuffer()
+        payload = _start_stop_payload(0x3D)
+        frames = _make_fast_packet(PGN_SIMRAD_START_STOP, 9, payload)
+        # Feed frame 1 before frame 0 — should be discarded.
+        assert buf.feed(PGN_SIMRAD_START_STOP, 9, frames[1]) is None
+        assert buf.feed(PGN_SIMRAD_START_STOP, 9, frames[0]) is None  # new session
+
+    def test_different_sources_dont_collide(self) -> None:
+        buf = FastPacketBuffer()
+        payload_a = _start_stop_payload(0x3D)
+        payload_b = _start_stop_payload(0x3E)
+        frames_a = _make_fast_packet(PGN_SIMRAD_START_STOP, 9, payload_a)
+        frames_b = _make_fast_packet(PGN_SIMRAD_START_STOP, 12, payload_b)
+        buf.feed(PGN_SIMRAD_START_STOP, 9, frames_a[0])
+        buf.feed(PGN_SIMRAD_START_STOP, 12, frames_b[0])
+        result_b = buf.feed(PGN_SIMRAD_START_STOP, 12, frames_b[1])
+        result_a = buf.feed(PGN_SIMRAD_START_STOP, 9, frames_a[1])
+        assert result_a == payload_a
+        assert result_b == payload_b
+
+    def test_set_timer_full_decode_roundtrip(self) -> None:
+        buf = FastPacketBuffer()
+        payload = _set_timer_payload(5)
+        frames = _make_fast_packet(PGN_SIMRAD_SET_TIMER, 9, payload)
+        for frame in frames[:-1]:
+            assert buf.feed(PGN_SIMRAD_SET_TIMER, 9, frame) is None
+        assembled = buf.feed(PGN_SIMRAD_SET_TIMER, 9, frames[-1])
+        assert assembled is not None
+        result = decode(PGN_SIMRAD_SET_TIMER, assembled, 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "set"
+        assert result.minutes == 5
