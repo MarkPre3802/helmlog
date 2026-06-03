@@ -41,71 +41,7 @@ from helmlog.nmea2000 import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable
-
-# ---------------------------------------------------------------------------
-# Simrad timer delta — racing.startTimer.* paths
-# ---------------------------------------------------------------------------
-
-_SK_TIMER_STATE = "racing.startTimer.state"
-_SK_TIMER_DURATION = "racing.startTimer.duration"
-_TIMER_STATE_VALUES = frozenset({"running", "stopped", "reset", "nearest-minute"})
-
-
-@dataclass(frozen=True)
-class TimerDelta:
-    """A racing.startTimer.* update extracted from a Signal K delta."""
-
-    path: str       # _SK_TIMER_STATE or _SK_TIMER_DURATION
-    value: str | int  # state string or duration integer (seconds)
-    nmea_ts: datetime
-
-
-def extract_timer_deltas(raw: str, *, self_context: str | None = None) -> list[TimerDelta]:
-    """Parse timer-related paths from a raw SK delta message.
-
-    Returns a (possibly empty) list of TimerDelta objects.
-    Silently ignores malformed messages — same contract as process_delta.
-    """
-    try:
-        delta: Any = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-
-    context: str = delta.get("context", "vessels.self")
-    if (
-        context
-        and context != "vessels.self"
-        and not context.endswith(".self")
-        and (not self_context or context != self_context)
-    ):
-        return []
-
-    results: list[TimerDelta] = []
-    for update in delta.get("updates", []):
-        ts_str: str = update.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            ts = datetime.now(UTC)
-
-        for entry in update.get("values", []):
-            path: str = entry.get("path", "")
-            value: Any = entry.get("value")
-            if value is None:
-                continue
-
-            if path == _SK_TIMER_STATE and value in _TIMER_STATE_VALUES:
-                results.append(TimerDelta(path=path, value=str(value), nmea_ts=ts))
-
-            elif path == _SK_TIMER_DURATION:
-                try:
-                    results.append(TimerDelta(path=path, value=int(value), nmea_ts=ts))
-                except (TypeError, ValueError):
-                    logger.warning("SK: non-integer racing.startTimer.duration value {!r}", value)
-
-    return results
-
+    from collections.abc import AsyncGenerator, AsyncIterator
 
 _RAD_TO_DEG: float = 180.0 / math.pi
 _MPS_TO_KTS: float = 1.94384449
@@ -393,16 +329,11 @@ class SKReader:
             await storage.write(record)
     """
 
-    def __init__(
-        self,
-        config: SKReaderConfig,
-        on_timer_delta: Callable[[TimerDelta], Any] | None = None,
-    ) -> None:
+    def __init__(self, config: SKReaderConfig) -> None:
         self._config = config
         self._buf: dict[str, float] = {}
         self._self_context: str | None = None
         self._token: str | None = None
-        self._on_timer_delta = on_timer_delta
 
     def __aiter__(self) -> AsyncIterator[PGNRecord]:
         return self._stream()
@@ -504,11 +435,6 @@ class SKReader:
                             raw_str, self._buf, self_context=self._self_context
                         ):
                             yield record
-                        if self._on_timer_delta is not None:
-                            for td in extract_timer_deltas(
-                                raw_str, self_context=self._self_context
-                            ):
-                                await self._on_timer_delta(td)
             except asyncio.CancelledError:
                 logger.info("SK: cancelled — stopping")
                 raise
