@@ -19,6 +19,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from helmlog.auth import require_auth
@@ -476,6 +477,25 @@ async def api_bg_timer_command(
     return JSONResponse({"ok": True})
 
 
+async def _bg_send(request: Request, command: str, minutes: int | None = None) -> None:
+    """Forward a command to B&G instruments when integration is active.
+
+    No-op if the Instrument Timer toggle is OFF or no CAN writer is wired up.
+    Failures are logged as warnings and never propagate — B&G sync is
+    best-effort and HelmLog continues regardless.
+    """
+    row = await get_storage(request).get_simrad_timer_state()
+    if not row or not row["instrument_timer_on"]:
+        return
+    can_writer = getattr(request.app.state, "can_writer", None)
+    if can_writer is None:
+        return
+    try:
+        await can_writer.send(command, minutes)
+    except Exception as exc:
+        logger.warning("B&G outbound {!r} failed: {}", command, exc)
+
+
 # ---------------------------------------------------------------------------
 # Page (viewer)
 # ---------------------------------------------------------------------------
@@ -551,6 +571,7 @@ async def api_arm(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _save_state(request, state)
     await audit(request, "race_start.arm", detail=body.kind, user=user)
+    await _bg_send(request, "set", minutes=5)
     return JSONResponse(await _build_snapshot(request, state))
 
 
@@ -578,6 +599,7 @@ async def api_sync(
         detail=f"offset={body.expected_signal_offset_s}",
         user=user,
     )
+    await _bg_send(request, "nearest-minute")
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -598,6 +620,10 @@ async def api_nudge(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _save_state(request, new_state)
     await audit(request, "race_start.nudge", detail=str(body.delta_s), user=user)
+    instr_row = await get_storage(request).get_simrad_timer_state()
+    if instr_row and instr_row.get("duration_s") is not None:
+        new_duration_s = max(60, instr_row["duration_s"] + body.delta_s)
+        await _bg_send(request, "set", minutes=max(1, round(new_duration_s / 60)))
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -613,6 +639,7 @@ async def api_postpone(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _save_state(request, new_state)
     await audit(request, "race_start.postpone", user=user)
+    await _bg_send(request, "stop")
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -654,6 +681,7 @@ async def api_recall(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _save_state(request, new_state)
     await audit(request, "race_start.recall", user=user)
+    await _bg_send(request, "stop")
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -695,6 +723,7 @@ async def api_abandon(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _save_state(request, new_state)
     await audit(request, "race_start.abandon", user=user)
+    await _bg_send(request, "stop")
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -706,6 +735,7 @@ async def api_reset(
     new_state = reset()
     await _save_state(request, new_state)
     await audit(request, "race_start.reset", user=user)
+    await _bg_send(request, "reset")
     return JSONResponse(await _build_snapshot(request, new_state))
 
 

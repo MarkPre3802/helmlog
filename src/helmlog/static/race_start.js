@@ -171,6 +171,14 @@
     instrToggleEl.textContent = on ? "Disable" : "Enable";
     instrToggleEl.classList.toggle("active", !!on);
 
+    // B&G panel buttons are only active when integration is ON and user is crew.
+    if (isWriter) {
+      ["rs-bg-start", "rs-bg-stop", "rs-bg-reset", "rs-bg-nearest-min"].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = !on;
+      });
+    }
+
     if (!instr || (!instr.duration_s && !instr.t0_utc)) {
       instrStatusEl.innerHTML = "No data received from B&amp;G";
       return;
