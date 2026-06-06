@@ -365,6 +365,14 @@ async def api_internal_timer_event(
 
     storage: Storage = get_storage(request)
     row = await storage.get_simrad_timer_state()
+
+    # When the user has explicitly disabled B&G integration, ignore all inbound
+    # events so the toggle cannot auto-re-enable itself from B&G broadcasts.
+    # row is None means no stored state at all (fresh install / first headless
+    # boot) — in that case we allow auto-ON so headless mode works out of the box.
+    if row is not None and not row["instrument_timer_on"]:
+        return JSONResponse({"ok": True})
+
     state = (
         SimradTimerState(
             instrument_timer_on=row["instrument_timer_on"],
