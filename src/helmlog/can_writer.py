@@ -34,10 +34,16 @@ _CMD_RESET = 0x40
 TimerCommand = Literal["start", "stop", "reset", "nearest-minute", "set"]
 
 
-def _fast_packet_frames(can_id: int, payload: bytes) -> list[can.Message]:
-    """Pack payload into NMEA 2000 Fast Packet CAN frames."""
+def _fast_packet_frames(can_id: int, payload: bytes, seq: int = 0) -> list[can.Message]:
+    """Pack payload into NMEA 2000 Fast Packet CAN frames.
+
+    seq is the 3-bit sequence counter (0-7) that must increment for each new
+    fast packet transfer on the same (source, PGN) pair so receivers can
+    distinguish retransmissions from new data.
+    """
+    seq_bits = (seq & 0x7) << 5
     frames: list[can.Message] = []
-    frame0 = bytes([0x00, len(payload)]) + payload[:6]
+    frame0 = bytes([seq_bits | 0x00, len(payload)]) + payload[:6]
     frames.append(
         can.Message(arbitration_id=can_id, data=frame0.ljust(8, b"\xff"), is_extended_id=True)
     )
@@ -46,7 +52,7 @@ def _fast_packet_frames(can_id: int, payload: bytes) -> list[can.Message]:
         chunk = payload[offset : offset + 7]
         frames.append(can.Message(
             arbitration_id=can_id,
-            data=(bytes([frame_num]) + chunk).ljust(8, b"\xff"),
+            data=(bytes([seq_bits | frame_num]) + chunk).ljust(8, b"\xff"),
             is_extended_id=True,
         ))
         offset += 7
@@ -71,6 +77,10 @@ class CANWriter:
     def __init__(self, channel: str = "can0") -> None:
         self._channel = channel
         self._bus: can.BusABC | None = None
+        # Per-PGN sequence counters (0-7, mod 8) — NMEA 2000 Fast Packet
+        # requires the 3-bit sequence counter to increment for each new
+        # transfer so receivers can distinguish new data from retransmissions.
+        self._seq: dict[int, int] = {}
 
     async def start(self) -> None:
         """Open the CAN bus and claim our source address."""
@@ -103,6 +113,12 @@ class CANWriter:
             await loop.run_in_executor(None, self._bus.shutdown)
             self._bus = None
 
+    def _next_seq(self, can_id: int) -> int:
+        """Return and advance the 3-bit sequence counter for this CAN ID."""
+        seq = self._seq.get(can_id, 0)
+        self._seq[can_id] = (seq + 1) & 0x7
+        return seq
+
     async def send(self, command: TimerCommand, minutes: int | None = None) -> None:
         """Transmit a timer command to the B&G instruments."""
         if self._bus is None:
@@ -115,7 +131,7 @@ class CANWriter:
             payload = bytes([0x41, 0x9F, 0xFF, 0xFF, 0xFF, 0xFF,
                              0x07, 0x42, 0x00, 0x01, minutes, 0xFF, 0xFF, 0xFF])
             # fmt: on
-            frames = _fast_packet_frames(_CAN_ID_130845, payload)
+            frames = _fast_packet_frames(_CAN_ID_130845, payload, self._next_seq(_CAN_ID_130845))
         else:
             cmd_byte = {
                 "start": _CMD_START,
@@ -126,7 +142,7 @@ class CANWriter:
             payload = bytes(
                 [0x41, 0x9F, 0xFF, 0xFF, 0x01, 0x17, cmd_byte, 0x00, 0x00, 0x00, 0x00, 0x00]
             )
-            frames = _fast_packet_frames(_CAN_ID_130850, payload)
+            frames = _fast_packet_frames(_CAN_ID_130850, payload, self._next_seq(_CAN_ID_130850))
 
         loop = asyncio.get_running_loop()
         for i, frame in enumerate(frames):
