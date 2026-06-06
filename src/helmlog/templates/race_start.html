@@ -38,11 +38,17 @@
                      margin-bottom: .5rem; }
   .rs-instr-header h3 { margin: 0; font-size: .9rem; text-transform: uppercase;
                         letter-spacing: .08em; color: var(--text-muted); }
-  .rs-instr-toggle { padding: .35rem .9rem; font-size: .85rem; font-weight: 600;
-                     border-radius: .35rem; border: 1px solid var(--border);
-                     background: var(--bg-elev); color: var(--text-primary); cursor: pointer; }
-  .rs-instr-toggle.active { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
-  .rs-instr-toggle:disabled { opacity: .4; cursor: not-allowed; }
+  .rs-instr-switch { position: relative; display: inline-block; width: 48px; height: 26px;
+                     flex-shrink: 0; }
+  .rs-instr-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+  .rs-instr-slider { position: absolute; cursor: pointer; inset: 0;
+                     background: var(--border, #d1d5db); border-radius: 26px; transition: .2s; }
+  .rs-instr-slider::before { position: absolute; content: ""; height: 20px; width: 20px;
+                              left: 3px; bottom: 3px; background: #fff; border-radius: 50%;
+                              transition: .2s; }
+  .rs-instr-switch input:checked + .rs-instr-slider { background: var(--accent, #2563eb); }
+  .rs-instr-switch input:checked + .rs-instr-slider::before { transform: translateX(22px); }
+  .rs-instr-switch input:disabled + .rs-instr-slider { opacity: .4; cursor: not-allowed; }
   .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
   .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
   .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
@@ -135,8 +141,11 @@
   <div class="rs-instr" id="rs-instr-panel">
     <div class="rs-instr-header">
       <h3>Instrument Timer (B&amp;G)</h3>
-      <button id="rs-instr-toggle" class="rs-instr-toggle"
-              {% if not is_writer %}disabled{% endif %}>—</button>
+      <label class="rs-instr-switch">
+        <input type="checkbox" id="rs-instr-toggle"
+               {% if not is_writer %}disabled{% endif %}>
+        <span class="rs-instr-slider"></span>
+      </label>
     </div>
     <div class="rs-instr-status" id="rs-instr-status">No data received</div>
     <div class="rs-instr-controls">

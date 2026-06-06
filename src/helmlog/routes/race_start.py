@@ -572,6 +572,19 @@ async def api_arm(
     await _save_state(request, state)
     await audit(request, "race_start.arm", detail=body.kind, user=user)
     await _bg_send(request, "set", minutes=5)
+    # Optimistic: persist 5-min duration immediately so the clock shows 05:00
+    # even if B&G doesn't echo the SET frame back to the bridge.
+    instr_row = await get_storage(request).get_simrad_timer_state()
+    if instr_row and instr_row["instrument_timer_on"]:
+        t0 = datetime.fromisoformat(instr_row["t0_utc"]) if instr_row.get("t0_utc") else None
+        await get_storage(request).upsert_simrad_timer_state(
+            instrument_timer_on=True,
+            duration_s=300,
+            t0_utc=t0,
+            stopped_remaining_s=None,
+            is_running=bool(instr_row["is_running"]),
+            now_utc=_now_utc(request),
+        )
     return JSONResponse(await _build_snapshot(request, state))
 
 
@@ -599,7 +612,18 @@ async def api_sync(
         detail=f"offset={body.expected_signal_offset_s}",
         user=user,
     )
-    await _bg_send(request, "nearest-minute")
+    # Running → snap to nearest minute. Stopped → start the timer.
+    instr_row = await get_storage(request).get_simrad_timer_state()
+    if instr_row and instr_row["instrument_timer_on"]:
+        can_writer = getattr(request.app.state, "can_writer", None)
+        if can_writer is not None:
+            try:
+                if instr_row["is_running"]:
+                    await can_writer.send("nearest-minute")
+                else:
+                    await can_writer.send("start")
+            except Exception as exc:
+                logger.warning("B&G sync failed: {}", exc)
     return JSONResponse(await _build_snapshot(request, new_state))
 
 
@@ -624,6 +648,17 @@ async def api_nudge(
     if instr_row and instr_row.get("duration_s") is not None:
         new_duration_s = max(60, instr_row["duration_s"] + body.delta_s)
         await _bg_send(request, "set", minutes=max(1, round(new_duration_s / 60)))
+        # Optimistic: update duration so consecutive nudges accumulate correctly
+        # even when B&G doesn't echo the SET frame back to the bridge.
+        t0 = datetime.fromisoformat(instr_row["t0_utc"]) if instr_row.get("t0_utc") else None
+        await get_storage(request).upsert_simrad_timer_state(
+            instrument_timer_on=instr_row["instrument_timer_on"],
+            duration_s=new_duration_s,
+            t0_utc=t0,
+            stopped_remaining_s=instr_row["stopped_remaining_s"],
+            is_running=bool(instr_row["is_running"]),
+            now_utc=_now_utc(request),
+        )
     return JSONResponse(await _build_snapshot(request, new_state))
 
 

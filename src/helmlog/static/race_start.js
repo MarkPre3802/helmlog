@@ -168,8 +168,7 @@
     if (!instrToggleEl || !instrStatusEl) return;
 
     const on = instr && instr.instrument_timer_on;
-    instrToggleEl.textContent = on ? "Disable" : "Enable";
-    instrToggleEl.classList.toggle("active", !!on);
+    instrToggleEl.checked = !!on;
 
     // B&G panel buttons are only active when integration is ON and user is crew.
     if (isWriter) {
@@ -317,6 +316,7 @@
       renderClock();
       renderScheduledStart();
       renderLineMetrics(snapshot.line_metrics);
+      renderInstrTimer();
     } catch (e) {
       showError(e.message);
     }
@@ -400,18 +400,17 @@
     if (bgNear)  bgNear.addEventListener( "click", () => bgCmd("nearest-minute"));
   }
 
-  // Instrument Timer toggle — does not return a full state snapshot,
-  // so refresh state separately after toggling.
+  // Instrument Timer toggle — checkbox; revert on failure.
   if (instrToggleEl && isWriter) {
-    instrToggleEl.addEventListener("click", async () => {
-      const instr = snapshot && snapshot.simrad_timer;
-      const currentlyOn = instr && instr.instrument_timer_on;
+    instrToggleEl.addEventListener("change", async () => {
+      const on = instrToggleEl.checked;
       showError("");
       try {
-        await postJSON("/api/race-start/instrument-timer", { on: !currentlyOn });
+        await postJSON("/api/race-start/instrument-timer", { on });
         await refreshState();
       } catch (e) {
         showError(e.message);
+        instrToggleEl.checked = !on;  // revert
       }
     });
   }
