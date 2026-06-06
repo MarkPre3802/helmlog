@@ -572,17 +572,17 @@ async def api_arm(
     await _save_state(request, state)
     await audit(request, "race_start.arm", detail=body.kind, user=user)
     await _bg_send(request, "set", minutes=5)
-    # Optimistic: persist 5-min duration immediately so the clock shows 05:00
-    # even if B&G doesn't echo the SET frame back to the bridge.
+    # Optimistic: SET loads the duration on B&G but does not start the timer.
+    # Clear is_running and t0_utc so the clock shows 05:00 rather than carrying
+    # over stale running state from a previous sequence.
     instr_row = await get_storage(request).get_simrad_timer_state()
     if instr_row and instr_row["instrument_timer_on"]:
-        t0 = datetime.fromisoformat(instr_row["t0_utc"]) if instr_row.get("t0_utc") else None
         await get_storage(request).upsert_simrad_timer_state(
             instrument_timer_on=True,
             duration_s=300,
-            t0_utc=t0,
+            t0_utc=None,
             stopped_remaining_s=None,
-            is_running=bool(instr_row["is_running"]),
+            is_running=False,
             now_utc=_now_utc(request),
         )
     return JSONResponse(await _build_snapshot(request, state))
