@@ -129,7 +129,7 @@ class CANWriter:
                 raise ValueError("minutes required for 'set'")
             # fmt: off
             payload = bytes([0x41, 0x9F, 0xFF, 0xFF, 0xFF, 0xFF,
-                             0x07, 0x42, 0x00, 0x01, minutes, 0xFF, 0xFF, 0xFF])
+                             0x07, 0x42, 0x00, 0x01, minutes, 0x00, 0x00, 0x00])
             # fmt: on
             frames = _fast_packet_frames(_CAN_ID_130845, payload, self._next_seq(_CAN_ID_130845))
         else:

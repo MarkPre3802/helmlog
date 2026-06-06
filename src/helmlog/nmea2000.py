@@ -219,6 +219,7 @@ class SimradTimerRecord:
         [2-5]  FF FF FF FF  reserved
         [6-9]  07 42 00 01  SET command discriminator
         [10]   minutes (0x03/0x04/0x05 …)
+        [11-13] 00 00 00  must be zero (0xFF = NMEA N/A sentinel, causes B&G to ignore)
 
     Running-state broadcast (also PGN 130845) has discriminator 02 00 00 01
     at [6:10] and is ignored.
