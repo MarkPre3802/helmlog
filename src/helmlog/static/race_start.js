@@ -1,9 +1,14 @@
-// Race start UI — #644.
+// Race start UI.
 //
-// Server returns a snapshot { phase, kind, t0_utc, sync_offset_s, flags, ... }.
-// The client computes the live countdown locally from t0_utc and reconciles
-// every 30 s. Each user action POSTs to a mutation endpoint and refreshes
-// from the response.
+// simrad_timer_state is the single source of truth for the timer,
+// whether B&G instruments are connected or not.
+//
+// Clock path: running → live countdown from t0_utc
+//             stopped → frozen stopped_remaining_s
+//             idle    → full duration_s or "--:--"
+//
+// Rolling timer: when running timer reaches 0:00 and rolling_timer_on is
+// set, the client calls timer-reset to restart at the full duration.
 
 (function () {
   "use strict";
@@ -12,114 +17,28 @@
   const isWriter = grid && grid.dataset.isWriter === "true";
   const errorEl = document.getElementById("rs-error");
   const clockEl = document.getElementById("rs-clock");
-  const phaseEl = document.getElementById("rs-phase");
-  const syncStatusEl = document.getElementById("rs-sync-status");
-  const classFlagEl = document.getElementById("rs-class-flag");
-  const prepFlagEl = document.getElementById("rs-prep-flag");
-  const specialFlagEl = document.getElementById("rs-special-flag");
+  const clockInputEl = document.getElementById("rs-clock-input");
+  const statusEl = document.getElementById("rs-status");
   const instrToggleEl = document.getElementById("rs-instr-toggle");
   const instrStatusEl = document.getElementById("rs-instr-status");
 
   let snapshot = null;
+  let editingDuration = false;
+  let rollingResetInFlight = false;
 
-  // Virtual-now matches the server's clock (real + simulator offset).
-  // In production sim_offset_s is always 0; in the simulator it's whatever
-  // the harness has set, so display + sync stay in sync with the FSM.
-  function virtualNowMs() {
-    const offset = snapshot && snapshot.sim_offset_s ? snapshot.sim_offset_s : 0;
-    return Date.now() + offset * 1000;
-  }
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
 
   function showError(msg) {
     errorEl.textContent = msg || "";
   }
 
-  function fmtClock(seconds) {
-    const sign = seconds < 0 ? "-" : "+";
+  function fmtMmSs(seconds) {
     const abs = Math.abs(Math.floor(seconds));
     const mm = Math.floor(abs / 60);
     const ss = abs % 60;
-    return sign + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-  }
-
-  function renderClock() {
-    const instr = snapshot && snapshot.simrad_timer;
-    const instrOn = instr && instr.instrument_timer_on;
-
-    // Instrument timer active — drive clock from B&G state.
-    if (instrOn) {
-      clockEl.classList.remove("warn", "go");
-
-      if (instr.is_running && instr.t0_utc) {
-        // Running: live countdown from t0_utc.
-        const remaining = (new Date(instr.t0_utc).getTime() - virtualNowMs()) / 1000;
-        const abs = Math.abs(remaining);
-        const sign = remaining >= 0 ? "" : "+";
-        clockEl.textContent = sign + String(Math.floor(abs / 60)).padStart(2, "0") + ":" + String(Math.floor(abs % 60)).padStart(2, "0");
-        clockEl.classList.toggle("warn", remaining > 0 && remaining <= 60);
-        clockEl.classList.toggle("go", remaining <= 0);
-        return;
-      }
-
-      if (!instr.is_running && instr.stopped_remaining_s !== null && instr.stopped_remaining_s !== undefined) {
-        // Stopped: show frozen remaining time.
-        const rem = instr.stopped_remaining_s;
-        clockEl.textContent = String(Math.floor(rem / 60)).padStart(2, "0") + ":" + String(Math.floor(rem % 60)).padStart(2, "0");
-        return;
-      }
-
-      if (instr.duration_s) {
-        // Duration set but not yet started — show full duration.
-        clockEl.textContent = String(Math.floor(instr.duration_s / 60)).padStart(2, "0") + ":" + String(instr.duration_s % 60).padStart(2, "0");
-        return;
-      }
-
-      clockEl.textContent = "--:--";
-      return;
-    }
-
-    // FSM clock — existing behaviour.
-    if (!snapshot || !snapshot.t0_utc) {
-      clockEl.textContent = "--:--";
-      clockEl.classList.remove("warn", "go");
-      return;
-    }
-    const t0 = new Date(snapshot.t0_utc).getTime();
-    const now = virtualNowMs();
-    const remaining = (t0 - now) / 1000;
-    const displaySec = remaining >= 0 ? remaining : -remaining;
-    const sign = remaining >= 0 ? "" : "+";
-    const mm = Math.floor(displaySec / 60);
-    const ss = Math.floor(displaySec % 60);
-    clockEl.textContent = sign + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
-    clockEl.classList.toggle("warn", remaining > 0 && remaining <= 60);
-    clockEl.classList.toggle("go", remaining <= 0);
-  }
-
-  function renderFlags() {
-    if (!snapshot || !snapshot.flags) return;
-    classFlagEl.textContent = snapshot.flags.class_flag_up || "—";
-    prepFlagEl.textContent = snapshot.flags.prep_flag_up || "—";
-    specialFlagEl.textContent = snapshot.flags.special_flag_up || "—";
-  }
-
-  function renderPhase() {
-    if (!snapshot) return;
-    phaseEl.textContent = snapshot.phase;
-    if (snapshot.last_sync_at_utc) {
-      const last = new Date(snapshot.last_sync_at_utc);
-      const ageS = (Date.now() - last.getTime()) / 1000;
-      if (ageS > 300) {
-        syncStatusEl.textContent = " · sync stale (" + Math.round(ageS) + "s)";
-        syncStatusEl.style.color = "var(--warning)";
-      } else {
-        syncStatusEl.textContent = " · synced";
-        syncStatusEl.style.color = "var(--text-muted)";
-      }
-    } else {
-      syncStatusEl.textContent = " · drift unverified";
-      syncStatusEl.style.color = "var(--warning)";
-    }
+    return String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
   }
 
   function fmtCountdown(seconds) {
@@ -135,33 +54,112 @@
     return sign + sec + "s";
   }
 
-  function renderScheduledStart() {
-    const schedView = document.getElementById("rs-scheduled-view");
-    const liveView = document.getElementById("rs-live-view");
-    if (!schedView || !liveView || !snapshot) return;
-    const sched = snapshot.scheduled_start;
-    // Scheduled-pre-arm: only when a schedule is set AND the FSM is still
-    // idle. Hide the live FSM controls entirely — auto-fire at T-15min
-    // takes over without any helm action, and cancellation lives on
-    // /control to avoid accidental taps near a real start.
-    const showScheduled =
-      !!sched && (snapshot.phase === "idle" || snapshot.phase === "abandoned");
-    if (showScheduled) {
-      schedView.style.display = "";
-      liveView.style.display = "none";
-      const fireMs = new Date(sched.scheduled_start_utc).getTime();
-      document.getElementById("rs-sched-utc").textContent =
-        new Date(fireMs).toLocaleString();
-      const ev = document.getElementById("rs-sched-event");
-      ev.textContent = sched.event ? "· " + sched.event : "";
-      const remaining = (fireMs - virtualNowMs()) / 1000;
-      document.getElementById("rs-sched-countdown").textContent =
-        fmtCountdown(remaining);
+  // ---------------------------------------------------------------------------
+  // Clock rendering
+  // ---------------------------------------------------------------------------
+
+  function remainingSeconds() {
+    const instr = snapshot && snapshot.simrad_timer;
+    if (!instr) return null;
+    if (instr.is_running && instr.t0_utc) {
+      return (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
+    }
+    if (!instr.is_running && instr.stopped_remaining_s != null) {
+      return instr.stopped_remaining_s;
+    }
+    if (instr.duration_s != null) {
+      return instr.duration_s;
+    }
+    return null;
+  }
+
+  function renderClock() {
+    if (editingDuration) return;
+    const instr = snapshot && snapshot.simrad_timer;
+    clockEl.classList.remove("warn", "go");
+
+    if (!instr) {
+      clockEl.textContent = "--:--";
+      return;
+    }
+
+    if (instr.is_running && instr.t0_utc) {
+      const remaining = (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
+      const abs = Math.abs(remaining);
+      const sign = remaining >= 0 ? "" : "+";
+      clockEl.textContent = sign + fmtMmSs(abs);
+      clockEl.classList.toggle("warn", remaining > 0 && remaining <= 60);
+      clockEl.classList.toggle("go", remaining <= 0);
+
+      // Rolling timer: auto-reset when countdown reaches 0:00.
+      if (remaining <= 0 && instr.rolling_timer_on && isWriter && !rollingResetInFlight) {
+        rollingResetInFlight = true;
+        postJSON("/api/race-start/timer-reset", {}).then(data => {
+          snapshot = data;
+          renderAll();
+          rollingResetInFlight = false;
+        }).catch(e => {
+          showError(e.message);
+          rollingResetInFlight = false;
+        });
+      }
+      return;
+    }
+
+    if (!instr.is_running && instr.stopped_remaining_s != null) {
+      clockEl.textContent = fmtMmSs(instr.stopped_remaining_s);
+      return;
+    }
+
+    if (instr.duration_s != null) {
+      clockEl.textContent = fmtMmSs(instr.duration_s);
+      return;
+    }
+
+    clockEl.textContent = "--:--";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Status line
+  // ---------------------------------------------------------------------------
+
+  function renderStatus() {
+    const instr = snapshot && snapshot.simrad_timer;
+    if (!instr) { statusEl.textContent = "—"; return; }
+    if (instr.is_running) {
+      statusEl.innerHTML = '<span style="color:var(--success,#22c55e)">Running</span>';
+    } else if (instr.stopped_remaining_s != null) {
+      statusEl.innerHTML = '<span style="color:var(--warning,#f5c518)">Stopped</span>';
     } else {
-      schedView.style.display = "none";
-      liveView.style.display = "";
+      statusEl.textContent = "Idle";
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Button states
+  // ---------------------------------------------------------------------------
+
+  function renderButtons() {
+    if (!isWriter) return;
+    const instr = snapshot && snapshot.simrad_timer;
+    const running = instr && instr.is_running;
+
+    // Set Start Value disabled when running.
+    const setBtn = document.getElementById("rs-btn-setval");
+    if (setBtn) setBtn.disabled = !!running;
+
+    // Rolling timer button reflects state.
+    const rollingBtn = document.getElementById("rs-btn-rolling");
+    if (rollingBtn) {
+      const on = instr && instr.rolling_timer_on;
+      rollingBtn.textContent = on ? "Rolling: ON" : "Rolling Timer";
+      rollingBtn.classList.toggle("active", !!on);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Instrument timer panel
+  // ---------------------------------------------------------------------------
 
   function renderInstrTimer() {
     const instr = snapshot && snapshot.simrad_timer;
@@ -170,47 +168,67 @@
     const on = instr && instr.instrument_timer_on;
     instrToggleEl.checked = !!on;
 
-    // B&G panel buttons are only active when integration is ON and user is crew.
-    if (isWriter) {
-      ["rs-bg-start", "rs-bg-stop", "rs-bg-reset", "rs-bg-nearest-min"].forEach(id => {
-        const btn = document.getElementById(id);
-        if (btn) btn.disabled = !on;
-      });
-    }
-
-    if (!instr || (!instr.duration_s && !instr.t0_utc)) {
+    if (!instr || (instr.duration_s == null && !instr.t0_utc)) {
       instrStatusEl.innerHTML = "No data received from B&amp;G";
       return;
     }
 
     if (!on) {
-      instrStatusEl.innerHTML = "Instrument timer disabled";
+      instrStatusEl.textContent = "Instrument timer disabled";
       return;
     }
 
     if (instr.is_running && instr.t0_utc) {
-      const remaining = (new Date(instr.t0_utc).getTime() - virtualNowMs()) / 1000;
-      const mm = Math.floor(Math.abs(remaining) / 60);
-      const ss = Math.floor(Math.abs(remaining) % 60);
+      const remaining = (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
       const sign = remaining >= 0 ? "" : "+";
       instrStatusEl.innerHTML =
         '<span class="running">Running</span> — ' +
-        sign + String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0");
+        sign + fmtMmSs(Math.abs(remaining));
       return;
     }
 
-    if (!instr.is_running && instr.stopped_remaining_s !== null && instr.stopped_remaining_s !== undefined) {
-      const rem = instr.stopped_remaining_s;
-      const mm = Math.floor(rem / 60);
-      const ss = Math.floor(rem % 60);
+    if (!instr.is_running && instr.stopped_remaining_s != null) {
       instrStatusEl.innerHTML =
         '<span class="stopped">Stopped</span> — ' +
-        String(mm).padStart(2, "0") + ":" + String(ss).padStart(2, "0") + " remaining";
+        fmtMmSs(instr.stopped_remaining_s) + " remaining";
       return;
     }
 
-    instrStatusEl.innerHTML = "Waiting for B&amp;G data";
+    instrStatusEl.textContent = "Waiting for B&G data";
   }
+
+  // ---------------------------------------------------------------------------
+  // Scheduled start view
+  // ---------------------------------------------------------------------------
+
+  function renderScheduledStart() {
+    const schedView = document.getElementById("rs-scheduled-view");
+    const liveView = document.getElementById("rs-live-view");
+    if (!schedView || !liveView || !snapshot) return;
+    const sched = snapshot.scheduled_start;
+    const instr = snapshot.simrad_timer;
+    const timerActive = instr && (instr.is_running || instr.stopped_remaining_s != null);
+    const showScheduled = !!sched && !timerActive;
+    if (showScheduled) {
+      schedView.style.display = "";
+      liveView.style.display = "none";
+      const fireMs = new Date(sched.scheduled_start_utc).getTime();
+      document.getElementById("rs-sched-utc").textContent =
+        new Date(fireMs).toLocaleString();
+      const ev = document.getElementById("rs-sched-event");
+      ev.textContent = sched.event ? "· " + sched.event : "";
+      const remaining = (fireMs - Date.now()) / 1000;
+      document.getElementById("rs-sched-countdown").textContent =
+        fmtCountdown(remaining);
+    } else {
+      schedView.style.display = "none";
+      liveView.style.display = "";
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Line metrics
+  // ---------------------------------------------------------------------------
 
   function renderLineCarryover() {
     const el = document.getElementById("rs-line-carryover");
@@ -233,7 +251,10 @@
   }
 
   function renderLineMetrics(metrics) {
-    function set(id, value) { document.getElementById(id).textContent = value; }
+    function set(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
     renderLineCarryover();
     if (!metrics) {
       set("rs-line-bearing", "—");
@@ -245,7 +266,7 @@
     }
     set("rs-line-bearing", metrics.line_bearing_deg.toFixed(0) + "°");
     set("rs-line-length", metrics.line_length_m.toFixed(0) + " m");
-    if (metrics.line_bias_deg === null || metrics.line_bias_deg === undefined) {
+    if (metrics.line_bias_deg == null) {
       set("rs-line-bias", "TWD needed");
     } else {
       const sign = metrics.line_bias_deg >= 0 ? "+" : "";
@@ -253,12 +274,29 @@
       set("rs-line-bias", sign + metrics.line_bias_deg.toFixed(0) + "°" + fav);
     }
     set("rs-line-dist",
-      metrics.distance_to_line_m === null ? "—"
+      metrics.distance_to_line_m == null ? "—"
         : metrics.distance_to_line_m.toFixed(0) + " m");
     set("rs-line-time",
-      metrics.time_to_line_s === null ? "—"
+      metrics.time_to_line_s == null ? "—"
         : metrics.time_to_line_s.toFixed(0) + " s");
   }
+
+  // ---------------------------------------------------------------------------
+  // Render all
+  // ---------------------------------------------------------------------------
+
+  function renderAll() {
+    renderStatus();
+    renderClock();
+    renderButtons();
+    renderScheduledStart();
+    renderLineMetrics(snapshot && snapshot.line_metrics);
+    renderInstrTimer();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Network
+  // ---------------------------------------------------------------------------
 
   async function refreshState() {
     try {
@@ -273,12 +311,7 @@
         throw new Error(data.detail || "HTTP " + r.status);
       }
       snapshot = await r.json();
-      renderPhase();
-      renderFlags();
-      renderClock();
-      renderScheduledStart();
-      renderLineMetrics(snapshot.line_metrics);
-      renderInstrTimer();
+      renderAll();
       showError("");
     } catch (e) {
       showError("could not load state: " + e.message);
@@ -292,12 +325,9 @@
       body: JSON.stringify(body || {}),
     });
     const ct = r.headers.get("content-type") || "";
-    const isJSON = ct.includes("application/json");
-    if (!isJSON) {
+    if (!ct.includes("application/json")) {
       const text = await r.text();
-      throw new Error(
-        "HTTP " + r.status + " (non-JSON): " + text.slice(0, 120)
-      );
+      throw new Error("HTTP " + r.status + " (non-JSON): " + text.slice(0, 120));
     }
     const data = await r.json();
     if (!r.ok) {
@@ -311,63 +341,115 @@
     showError("");
     try {
       snapshot = await postJSON(url, body);
-      renderPhase();
-      renderFlags();
-      renderClock();
-      renderScheduledStart();
-      renderLineMetrics(snapshot.line_metrics);
-      renderInstrTimer();
+      renderAll();
     } catch (e) {
       showError(e.message);
     }
   }
 
-  function defaultT0Utc() {
-    // Default arm: 5 minutes from virtual-now, rounded up to next 30s.
-    // Using virtualNowMs() means the simulator's clock skew is honored
-    // so the displayed countdown actually reads ~5:00 after Arm.
-    const ms = virtualNowMs() + 5 * 60 * 1000;
-    const rounded = Math.ceil(ms / 30000) * 30000;
-    return new Date(rounded).toISOString();
+  // ---------------------------------------------------------------------------
+  // Set Start Value — inline MM:SS editing
+  // ---------------------------------------------------------------------------
+
+  function parseMmSs(raw) {
+    // Accept "M:SS", "MM:SS", "M SS", digits only (treated as seconds).
+    const cleaned = raw.trim().replace(/\s+/, ":");
+    const match = cleaned.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return null;
+    const mm = parseInt(match[1], 10);
+    const ss = parseInt(match[2], 10);
+    if (ss >= 60) return null;
+    const total = mm * 60 + ss;
+    if (total < 60 || total > 3600) return null;
+    return total;
   }
+
+  function enterEditMode() {
+    if (!isWriter) return;
+    const instr = snapshot && snapshot.simrad_timer;
+    if (instr && instr.is_running) return;
+    editingDuration = true;
+    const rem = remainingSeconds();
+    clockEl.style.display = "none";
+    clockInputEl.style.display = "";
+    clockInputEl.value = rem != null ? fmtMmSs(rem) : "05:00";
+    clockInputEl.focus();
+    clockInputEl.select();
+  }
+
+  function exitEditMode(commit) {
+    editingDuration = false;
+    clockInputEl.style.display = "none";
+    clockEl.style.display = "";
+    if (commit) {
+      const val = parseMmSs(clockInputEl.value);
+      if (val == null) {
+        showError("invalid time — enter MM:SS (e.g. 05:00), 1-60 minutes");
+        return;
+      }
+      action("/api/race-start/set-duration", { duration_s: val });
+    }
+  }
+
+  if (clockInputEl) {
+    clockInputEl.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); exitEditMode(true); }
+      if (e.key === "Escape") { e.preventDefault(); exitEditMode(false); }
+    });
+    clockInputEl.addEventListener("blur", () => {
+      // Small delay so a button click can fire before blur clears the input.
+      setTimeout(() => { if (editingDuration) exitEditMode(false); }, 150);
+    });
+    // Auto-insert colon after two digits.
+    clockInputEl.addEventListener("input", () => {
+      let v = clockInputEl.value.replace(/[^0-9:]/g, "");
+      if (v.length === 2 && !v.includes(":")) v += ":";
+      clockInputEl.value = v;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Button handlers
+  // ---------------------------------------------------------------------------
 
   function bind(id, fn) {
     const btn = document.getElementById(id);
-    if (btn && !btn.disabled) btn.addEventListener("click", fn);
+    if (btn) btn.addEventListener("click", fn);
   }
 
-  bind("rs-arm", () => action("/api/race-start/arm",
-        { kind: "5-4-1-0", t0_utc: defaultT0Utc() }));
-  bind("rs-sync", () => {
-    if (!snapshot || !snapshot.t0_utc) return showError("arm a sequence first");
-    // Sync rounds the countdown to the nearest minute. Use case: user
-    // hears the prep gun late — countdown reads 4:10 but should be 4:00.
-    // Tap sync; we re-anchor so remaining = round(remaining / 60) × 60.
-    const remaining = (new Date(snapshot.t0_utc).getTime() - virtualNowMs()) / 1000;
-    const rounded = Math.round(remaining / 60) * 60;
-    action("/api/race-start/sync", { expected_signal_offset_s: rounded });
+  bind("rs-btn-start", () => action("/api/race-start/start"));
+
+  bind("rs-btn-stop", () => action("/api/race-start/stop"));
+
+  bind("rs-btn-reset", () => action("/api/race-start/timer-reset"));
+
+  bind("rs-btn-sync", () => action("/api/race-start/sync"));
+
+  bind("rs-btn-setval", () => {
+    if (!isWriter) return;
+    if (editingDuration) {
+      exitEditMode(true);
+    } else {
+      enterEditMode();
+    }
   });
-  bind("rs-plus-min", () => action("/api/race-start/nudge", { delta_s: 60 }));
-  bind("rs-minus-min", () => action("/api/race-start/nudge", { delta_s: -60 }));
-  bind("rs-postpone", () => action("/api/race-start/postpone"));
-  bind("rs-recall", () => action("/api/race-start/recall"));
-  bind("rs-abandon", () => {
-    if (confirm("Abandon the race?")) action("/api/race-start/abandon");
-  });
-  bind("rs-reset", () => {
-    if (confirm("Reset the sequence?")) action("/api/race-start/reset");
+
+  bind("rs-btn-rolling", () => {
+    if (!isWriter) return;
+    const instr = snapshot && snapshot.simrad_timer;
+    const currentlyOn = instr && instr.rolling_timer_on;
+    action("/api/race-start/rolling-timer", { on: !currentlyOn });
   });
 
   // Pings use the boat's GPS feed (server-side latest_position from
-  // sk_reader / can_reader) — the phone is never the source of truth.
-  // For offline use without a fix, hold Shift to enter manual coords.
+  // sk_reader / can_reader). Hold Shift to enter manual coords.
   async function pingEnd(end) {
     if (!isWriter) return;
     let body = {};
     if (window.event && window.event.shiftKey) {
       const raw = prompt("Enter lat,lon for " + end + " end:");
       if (!raw) return;
-      const parts = raw.split(",").map((s) => parseFloat(s.trim()));
+      const parts = raw.split(",").map(s => parseFloat(s.trim()));
       if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1])) {
         return showError("expected 'lat,lon'");
       }
@@ -378,29 +460,7 @@
   bind("rs-ping-boat", () => pingEnd("boat"));
   bind("rs-ping-pin", () => pingEnd("pin"));
 
-  // B&G timer control buttons — send commands directly to the instruments via CAN.
-  if (isWriter) {
-    async function bgCmd(command, minutes) {
-      showError("");
-      try {
-        const body = { command };
-        if (minutes !== undefined) body.minutes = minutes;
-        await postJSON("/api/race-start/bg-timer-command", body);
-      } catch (e) {
-        showError(e.message);
-      }
-    }
-    const bgStart = document.getElementById("rs-bg-start");
-    const bgStop  = document.getElementById("rs-bg-stop");
-    const bgReset = document.getElementById("rs-bg-reset");
-    const bgNear  = document.getElementById("rs-bg-nearest-min");
-    if (bgStart) bgStart.addEventListener("click", () => bgCmd("start"));
-    if (bgStop)  bgStop.addEventListener( "click", () => bgCmd("stop"));
-    if (bgReset) bgReset.addEventListener("click", () => bgCmd("reset"));
-    if (bgNear)  bgNear.addEventListener( "click", () => bgCmd("nearest-minute"));
-  }
-
-  // Instrument Timer toggle — checkbox; revert on failure.
+  // Instrument Timer toggle — revert on failure.
   if (instrToggleEl && isWriter) {
     instrToggleEl.addEventListener("change", async () => {
       const on = instrToggleEl.checked;
@@ -410,21 +470,17 @@
         await refreshState();
       } catch (e) {
         showError(e.message);
-        instrToggleEl.checked = !on;  // revert
+        instrToggleEl.checked = !on;
       }
     });
   }
 
-  // Local clock tick at 4 Hz; reconcile from server every 2 s so that
-  // arm / sync / ping / postpone fired from one device shows up on
-  // every other device almost immediately (#644). This is a polling
-  // fallback — a WebSocket broadcast would be cheaper at scale, but at
-  // 2 s × handful of devices the load is negligible and the flow is
-  // robust to disconnect.
-  setInterval(() => { renderClock(); renderInstrTimer(); }, 250);
-  // Tick the scheduled-start countdown alongside the main clock so the
-  // helm sees the seconds drop without waiting for the 2 s state poll.
-  setInterval(renderScheduledStart, 1000);
+  // ---------------------------------------------------------------------------
+  // Tick loop
+  // ---------------------------------------------------------------------------
+
+  // Fast local tick for smooth countdown display; server reconcile every 2 s.
+  setInterval(() => { renderClock(); renderInstrTimer(); renderScheduledStart(); }, 250);
   setInterval(refreshState, 2000);
 
   refreshState();

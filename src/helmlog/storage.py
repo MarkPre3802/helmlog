@@ -2134,6 +2134,10 @@ _MIGRATIONS: dict[int, str] = {
             updated_at           TEXT NOT NULL
         );
     """,
+    87: """
+        ALTER TABLE simrad_timer_state
+            ADD COLUMN rolling_timer_on INTEGER NOT NULL DEFAULT 0;
+    """,
 }
 
 # Retention window for retired slugs (#449). Requests for a retired slug 301
@@ -4598,7 +4602,7 @@ class Storage:
         db = self._read_conn()
         cur = await db.execute(
             "SELECT instrument_timer_on, duration_s, t0_utc,"
-            "       stopped_remaining_s, is_running, updated_at"
+            "       stopped_remaining_s, is_running, updated_at, rolling_timer_on"
             "  FROM simrad_timer_state WHERE id = 1"
         )
         row = await cur.fetchone()
@@ -4611,6 +4615,7 @@ class Storage:
             "stopped_remaining_s": row[3],
             "is_running": bool(row[4]),
             "updated_at": row[5],
+            "rolling_timer_on": bool(row[6]),
         }
 
     async def upsert_simrad_timer_state(
@@ -4621,6 +4626,7 @@ class Storage:
         t0_utc: datetime | None,
         stopped_remaining_s: float | None,
         is_running: bool,
+        rolling_timer_on: bool = False,
         now_utc: datetime,
     ) -> None:
         """Upsert the singleton simrad timer state row."""
@@ -4628,14 +4634,15 @@ class Storage:
         await db.execute(
             "INSERT INTO simrad_timer_state"
             " (id, instrument_timer_on, duration_s, t0_utc,"
-            "  stopped_remaining_s, is_running, updated_at)"
-            " VALUES (1, ?, ?, ?, ?, ?, ?)"
+            "  stopped_remaining_s, is_running, rolling_timer_on, updated_at)"
+            " VALUES (1, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET"
             "   instrument_timer_on=excluded.instrument_timer_on,"
             "   duration_s=excluded.duration_s,"
             "   t0_utc=excluded.t0_utc,"
             "   stopped_remaining_s=excluded.stopped_remaining_s,"
             "   is_running=excluded.is_running,"
+            "   rolling_timer_on=excluded.rolling_timer_on,"
             "   updated_at=excluded.updated_at",
             (
                 int(instrument_timer_on),
@@ -4643,6 +4650,7 @@ class Storage:
                 t0_utc.isoformat() if t0_utc else None,
                 stopped_remaining_s,
                 int(is_running),
+                int(rolling_timer_on),
                 now_utc.isoformat(),
             ),
         )

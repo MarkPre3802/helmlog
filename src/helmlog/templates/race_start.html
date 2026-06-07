@@ -6,26 +6,26 @@
   .rs-grid { display: grid; gap: 1rem; padding: 1rem; max-width: 960px; margin: 0 auto; }
   .rs-clock { font-size: clamp(4rem, 18vw, 9rem); font-weight: 700; text-align: center;
               font-variant-numeric: tabular-nums; line-height: 1; padding: 1rem 0;
-              color: var(--text-primary); }
+              color: var(--text-primary); cursor: default; }
   .rs-clock.warn { color: var(--warning, #f5c518); }
   .rs-clock.go { color: var(--success, #22c55e); }
-  .rs-phase { text-align: center; font-size: 1rem; color: var(--text-muted); }
-  .rs-phase strong { color: var(--text-primary); text-transform: uppercase; letter-spacing: .1em; }
+  .rs-clock.editing { cursor: text; }
+  .rs-clock-input { font-size: clamp(4rem, 18vw, 9rem); font-weight: 700; text-align: center;
+                    font-variant-numeric: tabular-nums; line-height: 1; padding: .25rem;
+                    width: 100%; border: 2px solid var(--accent, #2563eb); border-radius: .5rem;
+                    background: var(--bg-elev); color: var(--text-primary);
+                    font-family: inherit; display: none; }
+  .rs-status { text-align: center; font-size: 1rem; color: var(--text-muted); min-height: 1.4rem; }
+  .rs-status strong { color: var(--text-primary); text-transform: uppercase; letter-spacing: .1em; }
   .rs-grid-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
   .rs-grid-buttons button { font-size: 1.25rem; font-weight: 600; padding: 1.5rem .5rem;
                             min-height: 5rem; border-radius: .5rem; border: 1px solid var(--border);
                             background: var(--bg-elev); color: var(--text-primary); cursor: pointer; }
   .rs-grid-buttons button:active { transform: translateY(1px); }
-  .rs-grid-buttons button.primary { background: var(--accent, #2563eb); color: #fff; }
-  .rs-grid-buttons button.danger { background: var(--danger, #b91c1c); color: #fff; }
+  .rs-grid-buttons button.primary { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
+  .rs-grid-buttons button.danger { background: var(--danger, #b91c1c); color: #fff; border-color: transparent; }
+  .rs-grid-buttons button.active { background: var(--success, #16a34a); color: #fff; border-color: transparent; }
   .rs-grid-buttons button:disabled { opacity: .4; cursor: not-allowed; }
-  .rs-row { display: flex; gap: .5rem; flex-wrap: wrap; justify-content: center; }
-  .rs-row button { flex: 1 1 8rem; padding: .5rem; }
-  .rs-flags { display: flex; gap: 1rem; align-items: center; justify-content: center;
-              padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; }
-  .rs-flag-cell { display: flex; flex-direction: column; align-items: center; gap: .25rem; }
-  .rs-flag-cell .label { font-size: .75rem; color: var(--text-muted); text-transform: uppercase; }
-  .rs-flag-cell .value { font-size: 1.5rem; font-weight: 600; min-height: 1.8rem; }
   .rs-line { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; }
   .rs-line dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
   .rs-line dt { color: var(--text-muted); }
@@ -52,15 +52,6 @@
   .rs-instr-status { font-size: .9rem; color: var(--text-muted); min-height: 1.3rem; }
   .rs-instr-status .running { color: var(--success, #22c55e); font-weight: 600; }
   .rs-instr-status .stopped { color: var(--warning, #f5c518); font-weight: 600; }
-  .rs-instr-controls { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .6rem; }
-  .rs-instr-controls button { flex: 1 1 5rem; padding: .4rem .5rem; font-size: .85rem;
-                              font-weight: 600; border-radius: .35rem;
-                              border: 1px solid var(--border); background: var(--bg-elev);
-                              color: var(--text-primary); cursor: pointer; }
-  .rs-instr-controls button:disabled { opacity: .4; cursor: not-allowed; }
-  .rs-instr-controls button.primary { background: var(--accent, #2563eb); color: #fff; border-color: transparent; }
-  .rs-instr-controls button.danger  { background: var(--danger, #b91c1c); color: #fff; border-color: transparent; }
-
 </style>
 {% endblock %}
 
@@ -70,13 +61,10 @@
   <div class="rs-readonly">Viewer mode — read only. Sign in as crew or admin to control.</div>
   {% endif %}
 
-  <div class="rs-phase">Phase: <strong id="rs-phase">—</strong>
-    <span id="rs-sync-status"></span></div>
+  <div class="rs-status"><strong id="rs-status">—</strong></div>
 
   <!-- Scheduled-pre-arm view: only visible when a schedule exists and the
-       FSM is still idle. Big d:hh:mm:ss countdown, no buttons — the
-       system auto-fires at T-15min so the helm can't accidentally arm
-       early or out-of-band. -->
+       timer is not yet running. Countdown to the gun; auto-arms server-side. -->
   <div id="rs-scheduled-view" style="display:none;text-align:center">
     <div style="font-size:.9rem;color:var(--text-secondary)">
       Scheduled start: <strong id="rs-sched-utc">—</strong>
@@ -88,40 +76,21 @@
     </div>
   </div>
 
-  <!-- Live FSM view: shown whenever the FSM is non-idle, or when no
-       schedule is set (so manual arm is still possible). -->
+  <!-- Live timer view -->
   <div id="rs-live-view">
     <div class="rs-clock" id="rs-clock">--:--</div>
-
-    <div class="rs-flags">
-      <div class="rs-flag-cell">
-        <div class="label">Class flag</div>
-        <div class="value" id="rs-class-flag">—</div>
-      </div>
-      <div class="rs-flag-cell">
-        <div class="label">Prep flag</div>
-        <div class="value" id="rs-prep-flag">—</div>
-      </div>
-      <div class="rs-flag-cell">
-        <div class="label">Special</div>
-        <div class="value" id="rs-special-flag">—</div>
-      </div>
-    </div>
+    <input class="rs-clock-input" id="rs-clock-input" type="text"
+           placeholder="MM:SS" maxlength="5" inputmode="numeric">
 
     <div class="rs-grid-buttons">
-      <button id="rs-sync" class="primary" {% if not is_writer %}disabled{% endif %}>Sync to gun</button>
-      <button id="rs-arm" {% if not is_writer %}disabled{% endif %}>Arm 5-4-1-0</button>
-      <button id="rs-ping-boat" {% if not is_writer %}disabled{% endif %}>Boat-end ping</button>
-      <button id="rs-ping-pin" {% if not is_writer %}disabled{% endif %}>Pin-end ping</button>
-      <button id="rs-plus-min" {% if not is_writer %}disabled{% endif %}>+1 min</button>
-      <button id="rs-minus-min" {% if not is_writer %}disabled{% endif %}>−1 min</button>
-    </div>
-
-    <div class="rs-row">
-      <button id="rs-postpone" {% if not is_writer %}disabled{% endif %}>Postpone (AP)</button>
-      <button id="rs-recall" {% if not is_writer %}disabled{% endif %}>General recall</button>
-      <button id="rs-abandon" class="danger" {% if not is_writer %}disabled{% endif %}>Abandon (N)</button>
-      <button id="rs-reset" {% if not is_writer %}disabled{% endif %}>Reset</button>
+      <button id="rs-btn-start"     class="primary" {% if not is_writer %}disabled{% endif %}>Start</button>
+      <button id="rs-btn-stop"      class="danger"  {% if not is_writer %}disabled{% endif %}>Stop Race</button>
+      <button id="rs-btn-reset"                     {% if not is_writer %}disabled{% endif %}>Reset</button>
+      <button id="rs-btn-sync"                      {% if not is_writer %}disabled{% endif %}>Sync</button>
+      <button id="rs-btn-setval"                    {% if not is_writer %}disabled{% endif %}>Set Start Value</button>
+      <button id="rs-btn-rolling"                   {% if not is_writer %}disabled{% endif %}>Rolling Timer</button>
+      <button id="rs-ping-boat"                     {% if not is_writer %}disabled{% endif %}>Boat-end ping</button>
+      <button id="rs-ping-pin"                      {% if not is_writer %}disabled{% endif %}>Pin-end ping</button>
     </div>
 
     <div class="rs-line">
@@ -137,7 +106,7 @@
     </div>
   </div>
 
-  <!-- Instrument Timer panel — shows B&G timer state; toggle requires crew -->
+  <!-- Instrument Timer panel — B&G toggle and status only -->
   <div class="rs-instr" id="rs-instr-panel">
     <div class="rs-instr-header">
       <h3>Instrument Timer (B&amp;G)</h3>
@@ -148,12 +117,6 @@
       </label>
     </div>
     <div class="rs-instr-status" id="rs-instr-status">No data received</div>
-    <div class="rs-instr-controls">
-      <button id="rs-bg-start"        class="primary" {% if not is_writer %}disabled{% endif %}>Start</button>
-      <button id="rs-bg-stop"                         {% if not is_writer %}disabled{% endif %}>Stop</button>
-      <button id="rs-bg-reset"                        {% if not is_writer %}disabled{% endif %}>Reset</button>
-      <button id="rs-bg-nearest-min"                  {% if not is_writer %}disabled{% endif %}>Nearest min</button>
-    </div>
   </div>
 
   <div class="rs-error" id="rs-error"></div>
