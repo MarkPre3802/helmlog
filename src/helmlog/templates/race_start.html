@@ -37,9 +37,21 @@
   .rs-setval-wrap button.editing { background: var(--accent, #2563eb); color: #fff; }
   .rs-setval-wrap button:disabled { opacity: .4; cursor: not-allowed; }
   .rs-line { padding: .75rem; border: 1px solid var(--border); border-radius: .5rem; }
-  .rs-line dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
-  .rs-line dt { color: var(--text-muted); }
-  .rs-line dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .rs-line-layout { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem 1.5rem;
+                    align-items: center; }
+  /* Left: secondary metrics — label/value pairs */
+  .rs-line-detail { display: grid; grid-template-columns: max-content 1fr;
+                    gap: .35rem .75rem; margin: 0; }
+  .rs-line-detail dt { font-size: 1rem; color: var(--text-muted); align-self: center; }
+  .rs-line-detail dd { margin: 0; font-size: 1.15rem; font-weight: 600;
+                       font-variant-numeric: tabular-nums; }
+  /* Right: primary tactical metrics — big numbers */
+  .rs-line-primary { display: flex; flex-direction: column; gap: .75rem; }
+  .rs-line-stat { text-align: center; }
+  .rs-line-stat-value { font-size: clamp(1.8rem, 8vw, 3rem); font-weight: 700;
+                        font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .rs-line-stat-label { font-size: .8rem; color: var(--text-muted);
+                        text-transform: uppercase; letter-spacing: .06em; margin-top: .15rem; }
   .rs-error { color: var(--danger, #b91c1c); text-align: center; min-height: 1.5rem; }
   .rs-readonly { text-align: center; padding: .5rem; background: var(--warning, #fef3c7);
                   color: #78350f; border-radius: .25rem; font-size: .85rem; }
@@ -121,13 +133,23 @@
     <div class="rs-line">
       <div id="rs-line-carryover" style="display:none;color:var(--warning,#f5c518);
            font-size:.85rem;padding:.25rem 0;font-style:italic"></div>
-      <dl>
-        <dt>Line bearing</dt><dd id="rs-line-bearing">—</dd>
-        <dt>Line length</dt><dd id="rs-line-length">—</dd>
-        <dt>Bias</dt><dd id="rs-line-bias">—</dd>
-        <dt>Distance to line</dt><dd id="rs-line-dist">—</dd>
-        <dt>Time to line</dt><dd id="rs-line-time">—</dd>
-      </dl>
+      <div class="rs-line-layout">
+        <dl class="rs-line-detail">
+          <dt>Bearing</dt><dd id="rs-line-bearing">—</dd>
+          <dt>Length</dt><dd id="rs-line-length">—</dd>
+          <dt>Bias</dt><dd id="rs-line-bias">—</dd>
+        </dl>
+        <div class="rs-line-primary">
+          <div class="rs-line-stat">
+            <div class="rs-line-stat-value" id="rs-line-dist">—</div>
+            <div class="rs-line-stat-label">Distance to line</div>
+          </div>
+          <div class="rs-line-stat">
+            <div class="rs-line-stat-value" id="rs-line-time">—</div>
+            <div class="rs-line-stat-label">Time to line</div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
