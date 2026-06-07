@@ -21,6 +21,7 @@
   const statusEl = document.getElementById("rs-status");
   const instrToggleEl = document.getElementById("rs-instr-toggle");
   const instrStatusEl = document.getElementById("rs-instr-status");
+  const rollingToggleEl = document.getElementById("rs-rolling-toggle");
 
   let snapshot = null;
   let editingDuration = false;
@@ -144,16 +145,17 @@
     const instr = snapshot && snapshot.simrad_timer;
     const running = instr && instr.is_running;
 
-    // Set Start Value disabled when running.
+    // Set Start Value disabled when running or editing.
     const setBtn = document.getElementById("rs-btn-setval");
-    if (setBtn) setBtn.disabled = !!running;
+    if (setBtn) {
+      setBtn.disabled = !!running;
+      setBtn.classList.toggle("editing", editingDuration);
+      setBtn.textContent = editingDuration ? "Confirm" : "Set Start Value";
+    }
 
-    // Rolling timer button reflects state.
-    const rollingBtn = document.getElementById("rs-btn-rolling");
-    if (rollingBtn) {
-      const on = instr && instr.rolling_timer_on;
-      rollingBtn.textContent = on ? "Rolling: ON" : "Rolling Timer";
-      rollingBtn.classList.toggle("active", !!on);
+    // Rolling timer switch reflects server state.
+    if (rollingToggleEl) {
+      rollingToggleEl.checked = !!(instr && instr.rolling_timer_on);
     }
   }
 
@@ -371,7 +373,7 @@
     editingDuration = true;
     const rem = remainingSeconds();
     clockEl.style.display = "none";
-    clockInputEl.style.display = "";
+    clockInputEl.style.display = "block";
     clockInputEl.value = rem != null ? fmtMmSs(rem) : "05:00";
     clockInputEl.focus();
     clockInputEl.select();
@@ -434,12 +436,20 @@
     }
   });
 
-  bind("rs-btn-rolling", () => {
-    if (!isWriter) return;
-    const instr = snapshot && snapshot.simrad_timer;
-    const currentlyOn = instr && instr.rolling_timer_on;
-    action("/api/race-start/rolling-timer", { on: !currentlyOn });
-  });
+  // Rolling Timer switch
+  if (rollingToggleEl && isWriter) {
+    rollingToggleEl.addEventListener("change", async () => {
+      const on = rollingToggleEl.checked;
+      showError("");
+      try {
+        await postJSON("/api/race-start/rolling-timer", { on });
+        await refreshState();
+      } catch (e) {
+        showError(e.message);
+        rollingToggleEl.checked = !on;
+      }
+    });
+  }
 
   // Pings use the boat's GPS feed (server-side latest_position from
   // sk_reader / can_reader). Hold Shift to enter manual coords.
