@@ -488,7 +488,7 @@ async def api_sync(
         # Round to nearest minute: if remainder >= 30s round up, else round down.
         nearest_minutes = round(remaining_s / 60)
         new_remaining_s = max(0, nearest_minutes * 60)
-        new_t0 = now + timedelta(seconds=new_remaining_s)
+        new_t0 = (now + timedelta(seconds=new_remaining_s)).replace(second=0, microsecond=0)
         await storage.upsert_simrad_timer_state(
             instrument_timer_on=row["instrument_timer_on"],
             duration_s=row["duration_s"],
