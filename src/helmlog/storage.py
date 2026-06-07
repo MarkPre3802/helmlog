@@ -203,7 +203,7 @@ _LIVE_KEYS = (
 # Schema version & migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION: int = 85
+_CURRENT_VERSION: int = 87
 
 _MIGRATIONS: dict[int, str] = {
     1: """

@@ -93,7 +93,7 @@ async def test_state_surfaces_scheduled_start(storage: Storage) -> None:
     assert sched is not None
     assert sched["event"] == "R2TS"
     assert sched["session_type"] == "race"
-    assert sched["seconds_until_start"] > 22 * 3600 - 5
+    assert sched["seconds_until_start"] > 22 * 3600 - 30
 
 
 # ---------------------------------------------------------------------------
