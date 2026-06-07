@@ -353,17 +353,10 @@
   // Set Start Value — inline MM:SS editing
   // ---------------------------------------------------------------------------
 
-  function parseMmSs(raw) {
-    // Accept "M:SS", "MM:SS", "M SS", digits only (treated as seconds).
-    const cleaned = raw.trim().replace(/\s+/, ":");
-    const match = cleaned.match(/^(\d{1,2}):(\d{2})$/);
-    if (!match) return null;
-    const mm = parseInt(match[1], 10);
-    const ss = parseInt(match[2], 10);
-    if (ss >= 60) return null;
-    const total = mm * 60 + ss;
-    if (total < 60 || total > 3600) return null;
-    return total;
+  function parseMinutes(raw) {
+    const n = parseInt(raw.trim(), 10);
+    if (!Number.isInteger(n) || n < 1 || n > 60) return null;
+    return n * 60;
   }
 
   function enterEditMode() {
@@ -372,9 +365,10 @@
     if (instr && instr.is_running) return;
     editingDuration = true;
     const rem = remainingSeconds();
+    const mins = rem != null ? Math.max(1, Math.round(rem / 60)) : 5;
     clockEl.style.display = "none";
     clockInputEl.style.display = "block";
-    clockInputEl.value = rem != null ? fmtMmSs(rem) : "05:00";
+    clockInputEl.value = String(mins);
     clockInputEl.focus();
     clockInputEl.select();
   }
@@ -384,9 +378,9 @@
     clockInputEl.style.display = "none";
     clockEl.style.display = "";
     if (commit) {
-      const val = parseMmSs(clockInputEl.value);
+      const val = parseMinutes(clockInputEl.value);
       if (val == null) {
-        showError("invalid time — enter MM:SS (e.g. 05:00), 1-60 minutes");
+        showError("enter whole minutes (1–60)");
         return;
       }
       action("/api/race-start/set-duration", { duration_s: val });
@@ -399,14 +393,11 @@
       if (e.key === "Escape") { e.preventDefault(); exitEditMode(false); }
     });
     clockInputEl.addEventListener("blur", () => {
-      // Small delay so a button click can fire before blur clears the input.
       setTimeout(() => { if (editingDuration) exitEditMode(false); }, 150);
     });
-    // Auto-insert colon after two digits.
+    // Strip non-digits as the user types.
     clockInputEl.addEventListener("input", () => {
-      let v = clockInputEl.value.replace(/[^0-9:]/g, "");
-      if (v.length === 2 && !v.includes(":")) v += ":";
-      clockInputEl.value = v;
+      clockInputEl.value = clockInputEl.value.replace(/[^0-9]/g, "");
     });
   }
 
