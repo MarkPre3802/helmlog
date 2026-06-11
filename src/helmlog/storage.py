@@ -203,7 +203,7 @@ _LIVE_KEYS = (
 # Schema version & migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION: int = 87
+_CURRENT_VERSION: int = 88
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -2137,6 +2137,9 @@ _MIGRATIONS: dict[int, str] = {
     87: """
         ALTER TABLE simrad_timer_state
             ADD COLUMN rolling_timer_on INTEGER NOT NULL DEFAULT 0;
+    """,
+    88: """
+        ALTER TABLE race_videos ADD COLUMN local_path TEXT;
     """,
 }
 
@@ -5570,6 +5573,7 @@ class Storage:
         sync_offset_s: float,
         duration_s: float | None = None,
         user_id: int | None = None,
+        local_path: str | None = None,
     ) -> int:
         """Add or replace a YouTube video link on a race.
 
@@ -5618,8 +5622,8 @@ class Storage:
         cur = await db.execute(
             "INSERT INTO race_videos"
             " (race_id, youtube_url, video_id, title, label,"
-            " sync_utc, sync_offset_s, duration_s, created_at, user_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " sync_utc, sync_offset_s, duration_s, created_at, user_id, local_path)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 race_id,
                 youtube_url,
@@ -5631,6 +5635,7 @@ class Storage:
                 duration_s,
                 now_str,
                 user_id,
+                local_path,
             ),
         )
         await db.execute("DELETE FROM maneuver_cache WHERE session_id = ?", (race_id,))
@@ -5641,12 +5646,50 @@ class Storage:
         )  # noqa: E501
         return cur.lastrowid
 
+    async def add_local_race_video(
+        self,
+        race_id: int,
+        local_path: str,
+        sync_utc: datetime,
+        sync_offset_s: float,
+        duration_s: float | None = None,
+        label: str = "",
+        user_id: int | None = None,
+    ) -> int:
+        """Link a locally-served video file to a race (no YouTube URL required)."""
+        db = self._conn()
+        now_str = datetime.now(UTC).isoformat()
+        cur = await db.execute(
+            "INSERT INTO race_videos"
+            " (race_id, youtube_url, video_id, title, label,"
+            " sync_utc, sync_offset_s, duration_s, created_at, user_id, local_path)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                race_id,
+                "",
+                "",
+                label or Path(local_path).name,
+                label,
+                sync_utc.isoformat(),
+                sync_offset_s,
+                duration_s,
+                now_str,
+                user_id,
+                local_path,
+            ),
+        )
+        await db.execute("DELETE FROM maneuver_cache WHERE session_id = ?", (race_id,))
+        await db.commit()
+        assert cur.lastrowid is not None
+        logger.info("Local race video added: id={} race_id={} path={}", cur.lastrowid, race_id, local_path)
+        return cur.lastrowid
+
     async def list_race_videos(self, race_id: int) -> list[dict[str, Any]]:
         """Return all videos linked to a race, ordered by created_at ASC."""
         db = self._read_conn()
         cur = await db.execute(
             "SELECT id, race_id, youtube_url, video_id, title, label,"
-            " sync_utc, sync_offset_s, duration_s, created_at"
+            " sync_utc, sync_offset_s, duration_s, created_at, local_path"
             " FROM race_videos WHERE race_id = ? ORDER BY created_at ASC",
             (race_id,),
         )

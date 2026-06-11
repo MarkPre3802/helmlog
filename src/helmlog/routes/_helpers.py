@@ -497,6 +497,13 @@ class VideoUpdate(BaseModel):
     sync_offset_s: float | None = None
 
 
+class LocalVideoCreate(BaseModel):
+    local_path: str  # absolute path on the server filesystem
+    label: str = ""
+    sync_utc: str  # UTC ISO 8601
+    sync_offset_s: float = 0.0
+
+
 class SailCreate(BaseModel):
     type: str  # 'main' | 'jib' | 'spinnaker'
     name: str

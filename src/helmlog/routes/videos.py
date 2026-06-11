@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import mimetypes
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from helmlog.auth import require_auth
-from helmlog.routes._helpers import VideoCreate, VideoUpdate, audit, get_storage
+from helmlog.routes._helpers import LocalVideoCreate, VideoCreate, VideoUpdate, audit, get_storage
 
 router = APIRouter()
 
@@ -261,3 +263,143 @@ async def api_delete_video(
     if not found:
         raise HTTPException(status_code=404, detail="Video not found")
     await audit(request, "video.delete", detail=str(video_id), user=_user)
+
+
+@router.post("/api/sessions/{session_id}/local-video", status_code=201)
+async def api_add_local_video(
+    request: Request,
+    session_id: int,
+    body: LocalVideoCreate,
+    _user: dict[str, Any] = Depends(require_auth("crew")),  # noqa: B008
+) -> JSONResponse:
+    """Link a locally-served video file to a race session.
+
+    The ``local_path`` must be an absolute path on the server filesystem.
+    The sync point (``sync_utc`` + ``sync_offset_s``) pins the video timeline
+    to logger time the same way YouTube links do.
+    """
+    storage = get_storage(request)
+    cur = await storage._conn().execute("SELECT id FROM races WHERE id = ?", (session_id,))
+    if await cur.fetchone() is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    local_path = Path(body.local_path)
+    if not local_path.exists():
+        raise HTTPException(status_code=422, detail=f"File not found on server: {body.local_path}")
+
+    try:
+        sync_utc = datetime.fromisoformat(body.sync_utc)
+        if sync_utc.tzinfo is None:
+            sync_utc = sync_utc.replace(tzinfo=UTC)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid sync_utc timestamp")  # noqa: B904
+
+    # Probe duration via ffprobe if available
+    duration_s: float | None = None
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(local_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        duration_s = float(result.stdout.strip())
+    except Exception:  # noqa: BLE001
+        pass
+
+    row_id = await storage.add_local_race_video(
+        race_id=session_id,
+        local_path=str(local_path),
+        sync_utc=sync_utc,
+        sync_offset_s=body.sync_offset_s,
+        duration_s=duration_s,
+        label=body.label,
+        user_id=_user.get("id"),
+    )
+    rows = await storage.list_race_videos(session_id)
+    row = next(r for r in rows if r["id"] == row_id)
+    await audit(request, "video.add_local", detail=str(local_path), user=_user)
+    return JSONResponse(row, status_code=201)
+
+
+@router.get("/api/videos/{video_id}/stream")
+async def api_stream_local_video(
+    request: Request,
+    video_id: int,
+    _user: dict[str, Any] = Depends(require_auth("viewer")),  # noqa: B008
+) -> StreamingResponse:
+    """Stream a locally-stored video file with HTTP range support.
+
+    Supports ``Range`` header for browser seek support (required by ``<video>``).
+    Only serves files whose path is registered in ``race_videos.local_path``.
+    """
+    storage = get_storage(request)
+    cur = await storage._read_conn().execute(
+        "SELECT local_path FROM race_videos WHERE id = ?", (video_id,)
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    local_path_str: str | None = row["local_path"]
+    if not local_path_str:
+        raise HTTPException(status_code=404, detail="No local file linked to this video")
+
+    file_path = Path(local_path_str)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found on server")
+
+    file_size = file_path.stat().st_size
+    mime_type = mimetypes.guess_type(str(file_path))[0] or "video/mp4"
+
+    range_header = request.headers.get("range")
+    if range_header:
+        # Parse "bytes=start-end"
+        try:
+            range_val = range_header.strip().replace("bytes=", "")
+            start_str, _, end_str = range_val.partition("-")
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+        except ValueError:
+            raise HTTPException(status_code=416, detail="Invalid range header")  # noqa: B904
+        end = min(end, file_size - 1)
+        chunk_size = end - start + 1
+
+        def _iter_range() -> Any:
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            _iter_range(),
+            status_code=206,
+            media_type=mime_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    # Full file
+    def _iter_file() -> Any:
+        with open(file_path, "rb") as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                yield data
+
+    return StreamingResponse(
+        _iter_file(),
+        media_type=mime_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )

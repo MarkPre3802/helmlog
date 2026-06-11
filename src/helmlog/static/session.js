@@ -1943,21 +1943,35 @@ function _utcForIndex(idx) {
 // YouTube IFrame Player
 // ---------------------------------------------------------------------------
 
+// Wrap an HTML5 <video> element in a YouTube-player-compatible interface
+// so the rest of the video sync code can treat both the same way.
+function _makeLocalPlayerAdapter(el) {
+  return {
+    seekTo(s) { el.currentTime = s; },
+    getCurrentTime() { return el.currentTime || 0; },
+    pauseVideo() { el.pause(); },
+    playVideo() { el.play(); },
+    getPlayerState() { return el.paused ? 2 : 1; },  // 1=playing, 2=paused
+  };
+}
+
 async function loadVideoPlayer() {
   const vr = await fetch('/api/sessions/' + SESSION_ID + '/videos');
   const videos = await vr.json();
   if (!videos.length) return;
 
-  // Use first video with a video_id
-  const vid = videos.find(v => v.video_id) || videos[0];
-  if (!vid || !vid.video_id) return;
+  // Prefer local-path videos; fall back to YouTube videos
+  const vid = videos.find(v => v.local_path) || videos.find(v => v.video_id) || videos[0];
+  if (!vid) return;
+  const isLocal = !!vid.local_path;
+  if (!isLocal && !vid.video_id) return;
 
   _videoSync = {
     syncUtc: new Date(vid.sync_utc),
     syncOffsetS: vid.sync_offset_s || 0,
     durationS: vid.duration_s || 0,
     player: null,
-    videoId: vid.video_id,
+    videoId: vid.video_id || '',
     allVideos: videos,
     activeIdx: videos.indexOf(vid),
   };
@@ -1975,10 +1989,41 @@ async function loadVideoPlayer() {
     }).join('');
   }
 
-  // Load YouTube IFrame API
-  const tag = document.createElement('script');
-  tag.src = 'https://www.youtube.com/iframe_api';
-  document.head.appendChild(tag);
+  if (isLocal) {
+    _initLocalPlayer(vid);
+  } else {
+    // Load YouTube IFrame API
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+  }
+}
+
+function _initLocalPlayer(vid) {
+  const el = document.getElementById('local-player');
+  const ytWrap = document.getElementById('yt-player');
+  el.style.display = '';
+  ytWrap.style.display = 'none';
+  el.src = '/api/videos/' + vid.id + '/stream';
+  _videoSync.player = _makeLocalPlayerAdapter(el);
+  // Drive setPosition from local video timeupdate
+  el.addEventListener('timeupdate', function() {
+    if (document.hidden) return;
+    const utc = _videoOffsetToUtc(el.currentTime);
+    if (utc) setPosition(utc, {source: 'video'});
+  });
+  // Register the surface so clicking on race events seeks the video
+  registerSurface('video', function(utc) {
+    if (_playClock.currentSource === 'audio' || _playClock.currentSource === 'mc') return;
+    if (!_videoSync || !_videoSync.player) return;
+    const offset = _utcToVideoOffset(utc);
+    if (offset === null || offset < 0) return;
+    if (_videoSync.durationS && offset > _videoSync.durationS) return;
+    const delta = Math.abs((_videoSync.player.getCurrentTime() || 0) - offset);
+    if (delta < 0.1) return;
+    _videoSync.player.seekTo(offset);
+  });
+  _applyDeepLink();
 }
 
 // YouTube API calls this global function when ready
@@ -2094,11 +2139,11 @@ function _onVideoReady() {
       }
     } catch (e) { /* swallow */ }
     const delta = currentOffset != null ? Math.abs(currentOffset - offset) : Infinity;
-    // While the clock tick is driving playback, the render callback fires at
-    // ~10 Hz. Issuing seekTo() on every tick for small deltas (<0.5s) causes
-    // the YouTube embed to stutter — the player is constantly re-buffering
-    // instead of playing. Skip small corrections and let YT run naturally.
-    if (delta < 0.5) return;
+    // HTML5 <video> handles small currentTime corrections without stutter;
+    // only skip the 0.5 s guard for YouTube embeds that re-buffer on every seekTo.
+    const isLocalVideo = !!(_videoSync.allVideos && _videoSync.allVideos[_videoSync.activeIdx] && _videoSync.allVideos[_videoSync.activeIdx].local_path);
+    if (!isLocalVideo && delta < 0.5) return;
+    if (isLocalVideo && delta < 0.1) return;
     if (delta > _LARGE_JUMP_SEC) {
       try {
         const state = typeof _videoSync.player.getPlayerState === 'function'
@@ -2133,7 +2178,17 @@ function switchVideo(idx) {
     btn.classList.toggle('active', i === idx);
   });
 
-  if (_videoSync.player && _videoSync.player.loadVideoById) {
+  if (vid.local_path) {
+    const el = document.getElementById('local-player');
+    const ytEl = document.getElementById('yt-player');
+    if (el) { el.style.display = ''; el.src = '/api/videos/' + vid.id + '/stream'; }
+    if (ytEl) ytEl.style.display = 'none';
+    if (el) _videoSync.player = _makeLocalPlayerAdapter(el);
+  } else if (_videoSync.player && _videoSync.player.loadVideoById) {
+    const el = document.getElementById('local-player');
+    const ytEl = document.getElementById('yt-player');
+    if (el) el.style.display = 'none';
+    if (ytEl) ytEl.style.display = '';
     _videoSync.player.loadVideoById(vid.video_id);
   }
 }
