@@ -207,6 +207,16 @@ one place.
   second; multi-camera overlays during maneuver windows (#641).
 - **Crew & sails** — who was on board, what sails were up, and
   when sails were changed.
+- **Boat setup** — rig tension, sail controls, deck hardware, crew
+  weight distribution, conditions, and instrument calibration values
+  recorded for the session. Displayed grouped by category with
+  timestamped history per parameter (latest value shown; previous
+  entries collapsible). Crew and admin users can click **Edit** to
+  open an inline form pre-filled with current values; saving posts
+  only changed parameters as new time-series entries with
+  `source="manual"`, preserving the full history. Preset-type
+  parameters (e.g. weight distribution) render as dropdowns; all
+  others use numeric inputs.
 - **Notes** — text, settings, and photo notes captured during the
   race.
 - **Discussion threads** (#478, #592) — anchored to a moment, a
