@@ -521,12 +521,37 @@ async def _run_llm_callback_detection(
 # Availability check
 # ---------------------------------------------------------------------------
 
+_TORCH_IMPORTABLE: bool | None = None
+
+
+def _torch_importable() -> bool:
+    """Return True only if ``import torch`` succeeds in a subprocess.
+
+    Running the probe in a subprocess prevents a SIGILL from a mismatched
+    torch wheel (e.g. AVX2 binary on Pi 4 Cortex-A72) from killing the main
+    process.  Result is cached for the lifetime of the process.
+    """
+    global _TORCH_IMPORTABLE
+    if _TORCH_IMPORTABLE is not None:
+        return _TORCH_IMPORTABLE
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import torch"],
+        capture_output=True,
+        timeout=30,
+    )
+    _TORCH_IMPORTABLE = result.returncode == 0
+    return _TORCH_IMPORTABLE
+
 
 def _pyannote_available() -> bool:
-    """Return True only if pyannote.audio (and torch) can be imported."""
+    """Return True only if torch and pyannote.audio are both usable."""
+    if not _torch_importable():
+        return False
     try:
         import pyannote.audio  # noqa: F401  # type: ignore[import-untyped]
-        import torch  # noqa: F401  # type: ignore[import-untyped]
 
         return True
     except ImportError:
@@ -699,14 +724,14 @@ def _extract_speaker_embeddings(
     cross-session auto-match can key on the same globally-unique label the
     segments store.
     """
-    try:
-        import numpy as np
-        import soundfile as sf
-        import torch
-        from pyannote.audio import Model
-    except ImportError:
+    if not _pyannote_available():
         logger.debug("pyannote/torch not available for embedding extraction")
         return {}
+
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from pyannote.audio import Model
 
     token = os.environ.get("HF_TOKEN") or None
     try:

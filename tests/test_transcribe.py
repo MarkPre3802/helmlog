@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from helmlog.transcribe import _merge, _try_remote_transcribe
+import helmlog.transcribe as _transcribe_mod
+from helmlog.transcribe import _merge, _torch_importable, _try_remote_transcribe
 
 # ---------------------------------------------------------------------------
 # _merge tests (existing)
@@ -181,3 +183,66 @@ async def test_try_remote_fallback_on_http_error(monkeypatch: pytest.MonkeyPatch
         result = await _try_remote_transcribe("/data/audio/test.wav", "base", diarize=True)
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _torch_importable — subprocess SIGILL guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_torch_cache() -> None:
+    """Reset the module-level torch probe cache before each test."""
+    _transcribe_mod._TORCH_IMPORTABLE = None
+    yield
+    _transcribe_mod._TORCH_IMPORTABLE = None
+
+
+def test_torch_importable_returns_true_when_subprocess_succeeds() -> None:
+    """Returns True when the torch probe subprocess exits 0."""
+    ok = MagicMock(spec=subprocess.CompletedProcess)
+    ok.returncode = 0
+    with patch("subprocess.run", return_value=ok) as mock_run:
+        assert _torch_importable() is True
+    mock_run.assert_called_once()
+
+
+def test_torch_importable_returns_false_on_sigill() -> None:
+    """Returns False when torch subprocess exits 132 (SIGILL on aarch64)."""
+    crashed = MagicMock(spec=subprocess.CompletedProcess)
+    crashed.returncode = 132
+    with patch("subprocess.run", return_value=crashed):
+        assert _torch_importable() is False
+
+
+def test_torch_importable_returns_false_on_import_error() -> None:
+    """Returns False when torch subprocess exits 1 (ImportError / not installed)."""
+    missing = MagicMock(spec=subprocess.CompletedProcess)
+    missing.returncode = 1
+    with patch("subprocess.run", return_value=missing):
+        assert _torch_importable() is False
+
+
+def test_torch_importable_caches_result() -> None:
+    """Subprocess is only called once; subsequent calls use the cached value."""
+    ok = MagicMock(spec=subprocess.CompletedProcess)
+    ok.returncode = 0
+    with patch("subprocess.run", return_value=ok) as mock_run:
+        assert _torch_importable() is True
+        assert _torch_importable() is True
+    mock_run.assert_called_once()
+
+
+def test_pyannote_available_false_when_torch_not_importable() -> None:
+    """_pyannote_available returns False without touching pyannote when torch is broken."""
+    from helmlog.transcribe import _pyannote_available
+
+    crashed = MagicMock(spec=subprocess.CompletedProcess)
+    crashed.returncode = 132
+    with (
+        patch("subprocess.run", return_value=crashed),
+        patch("helmlog.transcribe._pyannote_available") as _guard,
+    ):
+        _guard.side_effect = _pyannote_available
+        result = _pyannote_available()
+    assert result is False
