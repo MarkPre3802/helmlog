@@ -1,15 +1,19 @@
 """GoPro GPS alignment probe.
 
-Reads a GoPro .gpx file, finds the matching HelmLog race in the DB, and
-reports how well the GPS tracks align.  Both clocks are disciplined to the
+Reads a GoPro .mp4 or .gpx file, finds the matching HelmLog race in the DB,
+and reports how well the GPS tracks align.  Both clocks are disciplined to the
 same GPS constellation so the offset should be < 1 s.
+
+MP4 input requires gopro2gpx:
+    pip install gopro2gpx
 
 Usage
 -----
-    python scripts/gopro_gps_probe.py GOPRO.gpx
-    python scripts/gopro_gps_probe.py GOPRO.gpx --db /path/to/helmlog.db
-    python scripts/gopro_gps_probe.py GOPRO.gpx --race-id 42
-    python scripts/gopro_gps_probe.py GOPRO.gpx --race-id 42 --video-url https://youtu.be/...
+    python scripts/gopro_gps_probe.py GOPRO.mp4          # extract GPS from video
+    python scripts/gopro_gps_probe.py GOPRO.gpx          # use pre-exported GPX
+    python scripts/gopro_gps_probe.py GOPRO.mp4 --db /path/to/helmlog.db
+    python scripts/gopro_gps_probe.py GOPRO.mp4 --race-id 42
+    python scripts/gopro_gps_probe.py GOPRO.mp4 --race-id 42 --video-url https://youtu.be/...
 
 The last form also prints a ready-to-run ``helmlog link-video`` command.
 """
@@ -19,7 +23,9 @@ from __future__ import annotations
 import argparse
 import math
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -78,6 +84,53 @@ def load_gpx(path: Path) -> list[GpsPoint]:
 
     points.sort(key=lambda p: p.ts)
     return points
+
+
+# ---------------------------------------------------------------------------
+# MP4 → GPX extraction
+# ---------------------------------------------------------------------------
+
+def extract_gpx_from_mp4(mp4_path: Path) -> Path:
+    """Extract GPS telemetry from a GoPro MP4 and return path to a temp GPX file.
+
+    Requires gopro2gpx (pip install gopro2gpx).  Raises RuntimeError if not
+    installed or if the video has no GPS track.
+    """
+    try:
+        result = subprocess.run(
+            ["gopro2gpx", "--help"],
+            capture_output=True, timeout=5,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "gopro2gpx is not installed.\n"
+            "  Install it with:  pip install gopro2gpx\n"
+            "  Then re-run this script."
+        ) from None
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".gpx", delete=False)
+    tmp.close()
+    gpx_path = Path(tmp.name)
+
+    try:
+        result = subprocess.run(
+            ["gopro2gpx", str(mp4_path), str(gpx_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("gopro2gpx timed out — is the file accessible?") from None
+
+    if result.returncode != 0:
+        msg = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"gopro2gpx failed (exit {result.returncode}): {msg}")
+
+    if not gpx_path.exists() or gpx_path.stat().st_size == 0:
+        raise RuntimeError(
+            "gopro2gpx produced no output — the video may have no GPS track.\n"
+            "  Check the camera had a GPS fix before recording started."
+        )
+
+    return gpx_path
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +325,35 @@ def _default_db_path() -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Probe GoPro GPX alignment against HelmLog race data")
-    parser.add_argument("gpx", type=Path, help="Path to GoPro .gpx file")
+    parser = argparse.ArgumentParser(description="Probe GoPro GPS alignment against HelmLog race data")
+    parser.add_argument("input", type=Path, help="GoPro .mp4 or .gpx file")
     parser.add_argument("--db", type=Path, default=None, help="Path to helmlog.db (auto-detected if omitted)")
     parser.add_argument("--race-id", type=int, default=None, help="Race ID to compare against (auto-detected from time overlap if omitted)")
     parser.add_argument("--video-url", default=None, help="YouTube URL — if given, prints a ready-to-run link-video command")
     args = parser.parse_args()
 
-    # --- Load GPX ---
-    if not args.gpx.exists():
-        print(f"ERROR: GPX file not found: {args.gpx}", file=sys.stderr)
+    if not args.input.exists():
+        print(f"ERROR: File not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loading GPX: {args.gpx}")
-    gpx = load_gpx(args.gpx)
+    # --- Extract GPX from MP4 if needed ---
+    _tmp_gpx: Path | None = None
+    gpx_path = args.input
+    if args.input.suffix.lower() in (".mp4", ".mov", ".m4v"):
+        print(f"Extracting GPS track from {args.input.name} ...")
+        try:
+            gpx_path = extract_gpx_from_mp4(args.input)
+            _tmp_gpx = gpx_path
+            print(f"  Extracted to temporary GPX: {gpx_path}")
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # --- Load GPX ---
+    print(f"Loading GPX: {gpx_path}")
+    gpx = load_gpx(gpx_path)
+    if _tmp_gpx:
+        _tmp_gpx.unlink(missing_ok=True)
     if not gpx:
         print("ERROR: No track points found in GPX file.", file=sys.stderr)
         sys.exit(1)
@@ -378,8 +446,15 @@ def main() -> None:
         print(f"  --sync-offset 0.0  (start of video = t=0)")
         print(f"  (or equivalently: video offset at {_fmt_ts(gpx[0].ts)} is {result.time_offset_s:.2f} s)")
 
+        # Always print the local-video link command for the MP4
+        if args.input.suffix.lower() in (".mp4", ".mov", ".m4v"):
+            print(f"\nLink this video to the race (replace RACE_ID and adjust URL if needed):")
+            print(f"  curl -X POST http://localhost/api/sessions/{race_id}/local-video \\")
+            print(f"    -H 'Content-Type: application/json' \\")
+            print(f"    -d '{{\"local_path\": \"{args.input}\", \"sync_utc\": \"{sync_utc_iso}\", \"sync_offset_s\": 0.0}}'")
+
         if args.video_url:
-            print(f"\nReady-to-run link-video command:")
+            print(f"\nReady-to-run link-video command (YouTube):")
             print(f"  helmlog link-video \\")
             print(f"    --url '{args.video_url}' \\")
             print(f"    --sync-utc '{sync_utc_iso}' \\")
