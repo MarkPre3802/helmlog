@@ -84,6 +84,7 @@ class SKReaderConfig:
     username: str | None = field(default_factory=lambda: os.environ.get("SK_USERNAME"))
     password: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD"))
     password_file: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD_FILE"))
+    on_gps_time: Callable[[datetime], None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,17 @@ def process_delta(
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     logger.warning("SK: bad position value {!r}: {}", value, exc)
+                continue
+
+            if path == "navigation.datetime" and on_gps_time is not None:
+                try:
+                    gps_str = str(value).replace("Z", "+00:00")
+                    gps_dt = datetime.fromisoformat(gps_str)
+                    if gps_dt.tzinfo is None:
+                        gps_dt = gps_dt.replace(tzinfo=UTC)
+                    on_gps_time(gps_dt)
+                except (ValueError, TypeError) as exc:
+                    logger.debug("SK: bad navigation.datetime {!r}: {}", value, exc)
                 continue
 
             if path == "navigation.attitude":

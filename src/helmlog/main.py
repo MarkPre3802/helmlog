@@ -491,13 +491,23 @@ async def _run() -> None:
         try:
             if data_source == "signalk":
                 from helmlog.sk_reader import SKReader, SKReaderConfig
+                from helmlog.timesync import GpsTimeSyncer
 
-                sk_config = SKReaderConfig()
+                gps_syncer: GpsTimeSyncer | None = None
+                try:
+                    gps_syncer = GpsTimeSyncer()
+                except OSError as exc:
+                    logger.warning("GpsTimeSyncer unavailable (chrony SHM not ready?): {}", exc)
+
+                sk_config = SKReaderConfig(
+                    on_gps_time=gps_syncer.update if gps_syncer else None,
+                )
                 logger.info(
-                    "Logger starting: source=signalk host={}:{} db={}",
+                    "Logger starting: source=signalk host={}:{} db={} gps_timesync={}",
                     sk_config.host,
                     sk_config.port,
                     storage_config.db_path,
+                    gps_syncer is not None,
                 )
                 reader = SKReader(sk_config)
                 last_clock_flag = reader.clock_flag
