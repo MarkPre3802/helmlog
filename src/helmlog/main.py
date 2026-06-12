@@ -15,7 +15,7 @@ import asyncio
 import os
 import signal
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
@@ -691,6 +691,65 @@ async def _link_video(url: str, sync_utc_iso: str, sync_offset_s: float) -> None
     # Print a quick sanity-check URL at the sync point itself
     check = session.url_at(sync_utc)
     logger.info("Linked. Verify sync point: {}", check)
+
+
+# ---------------------------------------------------------------------------
+# gopro-match
+# ---------------------------------------------------------------------------
+
+
+async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
+    """Probe a local GoPro/MP4 file and print candidate races to match."""
+    from helmlog.gopro import GoProProbeError, match_sessions_to_video, probe_video
+    from helmlog.storage import Storage, StorageConfig
+
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        logger.error("Not a file: {}", p)
+        sys.exit(1)
+
+    try:
+        video = await asyncio.to_thread(probe_video, p, timezone)
+    except GoProProbeError as exc:
+        logger.error("Probing video failed: {}", exc)
+        sys.exit(1)
+
+    print(f"path:         {video.path}")
+    print(f"duration_s:   {video.duration_s}")
+    print(f"creation_utc: {video.creation_utc}")
+    print(f"gps_position: {video.gps_position}")
+
+    if video.start_utc is None or video.end_utc is None:
+        print("Video missing timestamps; cannot match to races.")
+        return
+
+    cfg = StorageConfig(db_path=db_path) if db_path else StorageConfig()
+    storage = Storage(cfg)
+    await storage.connect()
+    try:
+        start = video.start_utc - timedelta(hours=1)
+        end = video.end_utc + timedelta(hours=1)
+        races = await storage.list_races_in_range(start, end)
+        sessions = [
+            {"id": r.id, "name": r.name, "start_utc": r.start_utc, "end_utc": r.end_utc}
+            for r in races
+        ]
+        candidates = match_sessions_to_video(video, sessions, min_overlap_s=5)
+    finally:
+        await storage.close()
+
+    if not candidates:
+        print("No matching races found.")
+        return
+
+    print("\nCandidate matches:")
+    for c in candidates:
+        s = c["session"]
+        print(
+            f"  id={s['id']} name={s.get('name')!r}"
+            f" start={s['start_utc']} overlap_s={c['overlap_s']:.1f}"
+            f" frac={c['video_fraction']:.2f}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1655,6 +1714,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Seconds into the video at --sync-utc (default: 0)",
     )
 
+    gp = sub.add_parser(
+        "gopro-match",
+        help="Probe a GoPro/MP4 file and suggest matching races from history",
+    )
+    gp.add_argument("--path", required=True, metavar="FILE", help="Path to GoPro MP4")
+    gp.add_argument(
+        "--timezone",
+        default="UTC",
+        metavar="TZ",
+        help="Timezone for naive creation timestamps (default: UTC)",
+    )
+    gp.add_argument(
+        "--db",
+        default=None,
+        metavar="DB",
+        help="Path to HelmLog SQLite database (overrides DB_PATH env / default)",
+    )
+
     sub.add_parser("list-videos", help="List linked YouTube videos")
 
     sub.add_parser("list-cameras", help="Show configured cameras and their status")
@@ -1794,6 +1871,8 @@ def main() -> None:
                 sync_utc_iso = args.start if args.start else args.sync_utc
                 sync_offset = 0.0 if args.start else args.sync_offset
                 asyncio.run(_link_video(args.url, sync_utc_iso, sync_offset))
+            case "gopro-match":
+                asyncio.run(_gopro_match(args.path, args.timezone, args.db))
             case "list-videos":
                 asyncio.run(_list_videos())
             case "list-cameras":
