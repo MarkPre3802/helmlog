@@ -822,8 +822,8 @@ async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
         sys.exit(1)
 
     print(f"path:         {video.path}")
-    print(f"duration_s:   {video.duration_s:.1f}s" if video.duration_s else "duration_s:   unknown")
-    print(f"creation_utc: {video.creation_utc}  [{video.gps_source}]")
+    print(f"duration_s:   {video.duration_s}")
+    print(f"creation_utc: {video.creation_utc}")
     print(f"gps_position: {video.gps_position}")
 
     if video.start_utc is None or video.end_utc is None:
