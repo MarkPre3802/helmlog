@@ -110,6 +110,13 @@ def create_app(
     # -- Static files --
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+    # -- Local video files (served at /videos/<filename>) --
+    import pathlib
+
+    _videos_dir = pathlib.Path(os.environ.get("VIDEOS_DIR", "/home/mark/videos"))
+    if _videos_dir.is_dir():
+        app.mount("/videos", StaticFiles(directory=str(_videos_dir)), name="videos")
+
     # -- Peer API (federation endpoints for remote boats) --
     from helmlog.peer_api import _limiter as peer_limiter
     from helmlog.peer_api import router as peer_router
