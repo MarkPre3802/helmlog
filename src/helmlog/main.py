@@ -721,8 +721,10 @@ async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
     if video.gpmf_track:
         first, last = video.gpmf_track[0], video.gpmf_track[-1]
         span = (last.utc - first.utc).total_seconds()
-        print(f"gpmf_track:   {len(video.gpmf_track)} points, {span:.0f}s span"
-              f"  ({first.utc} → {last.utc})")
+        print(
+            f"gpmf_track:   {len(video.gpmf_track)} fixes, {span:.0f}s span"
+            f"  ({first.utc.isoformat()} → {last.utc.isoformat()})"
+        )
 
     if video.start_utc is None or video.end_utc is None:
         print("Video missing timestamps; cannot match to races.")
@@ -807,7 +809,28 @@ async def _link_local_video(
                 logger.error("Invalid sync-utc: {}", exc)
                 sys.exit(1)
         else:
-            sync_utc = race.start_utc
+            # Try to get accurate sync time from GPMF GPS embedded in the video.
+            from helmlog.gopro import GoProProbeError, probe_video
+
+            try:
+                video_info = await asyncio.to_thread(probe_video, src)
+            except GoProProbeError:
+                video_info = None
+
+            if video_info and video_info.gpmf_track:
+                sync_utc = video_info.gpmf_track[0].utc
+                sync_offset_s = 0.0
+                logger.info(
+                    "Using GPMF GPS time as sync: {} (video frame 0 ≈ GPS fix #0)",
+                    sync_utc,
+                )
+            else:
+                sync_utc = race.start_utc
+                logger.warning(
+                    "No GPMF GPS track found; defaulting sync to race start_utc ({}). "
+                    "Pass --sync-utc to override.",
+                    sync_utc,
+                )
 
         url = f"/videos/{src.name}"
         video_id = src.name

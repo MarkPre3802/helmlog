@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -98,27 +99,120 @@ def _collect_tags(data: dict[str, Any]) -> dict[str, str]:
     return tags
 
 
+def _parse_gpsu(s: str) -> datetime | None:
+    """Parse a GoPro GPSU timestamp string: YYMMDDHHMMSS[.sss]."""
+    try:
+        dt = datetime.strptime(s[:12], "%y%m%d%H%M%S")
+        return dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 class GoProProbeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class GpsFix:
+    """One GPS UTC timestamp extracted from GPMF telemetry."""
+
+    utc: datetime
 
 
 @dataclass(frozen=True)
 class GoProVideo:
     path: Path
     duration_s: float | None = None
-    creation_utc: datetime | None = None
+    creation_utc: datetime | None = None  # from file tags — often wrong on GoPro
     gps_position: tuple[float, float] | None = None
     tags: dict[str, str] = field(default_factory=dict)
+    gpmf_track: list[GpsFix] = field(default_factory=list)
+    gps_source: str = "none"  # "gpmf", "tags", "none"
 
     @property
     def start_utc(self) -> datetime | None:
+        # GPMF GPS time is authoritative; file creation_utc is unreliable on GoPro.
+        if self.gpmf_track:
+            return self.gpmf_track[0].utc
         return self.creation_utc
 
     @property
     def end_utc(self) -> datetime | None:
+        if self.gpmf_track:
+            return self.gpmf_track[-1].utc
         if self.creation_utc is None or self.duration_s is None:
             return None
         return self.creation_utc + timedelta(seconds=self.duration_s)
+
+
+def _find_gpmf_stream_index(streams: list[dict[str, Any]]) -> int | None:
+    """Return the stream index of the GoPro GPMF telemetry track, if present."""
+    for s in streams:
+        tag = s.get("codec_tag_string", "")
+        handler = s.get("tags", {}).get("handler_name", "")
+        if tag == "gpmd" or "gopro met" in handler.lower():
+            idx = s.get("index")
+            if isinstance(idx, int):
+                return idx
+    return None
+
+
+def _extract_gpmf_track(path: Path, stream_index: int) -> list[GpsFix]:
+    """Extract GPS UTC fixes from the GPMF telemetry stream embedded in the MP4.
+
+    Uses ffmpeg to dump the raw GPMF binary, then scans for GPSU records
+    (type 'U') which carry the GPS clock time as "YYMMDDHHMMSS.sss".
+    Only fixes with year >= 2020 are kept (earlier years = no GPS lock yet).
+    """
+    ffmpeg_cmd = os.environ.get("HELMLOG_FFMPEG", "ffmpeg")
+    try:
+        result = subprocess.run(
+            [
+                ffmpeg_cmd,
+                "-y",
+                "-i", str(path),
+                "-map", f"0:{stream_index}",
+                "-codec", "copy",
+                "-f", "rawvideo",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        logger.warning("ffmpeg not found; skipping GPMF GPS extraction")
+        return []
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffmpeg GPMF extraction failed: {}", exc)
+        return []
+
+    data = result.stdout
+    fixes: list[GpsFix] = []
+    i = 0
+    while i < len(data) - 8:
+        if data[i : i + 4] != b"GPSU":
+            i += 1
+            continue
+        typ = data[i + 4]
+        size = data[i + 5]
+        repeat = struct.unpack(">H", data[i + 6 : i + 8])[0]
+        payload_len = size * repeat
+        payload = data[i + 8 : i + 8 + payload_len]
+        total = 8 + payload_len
+        if total % 4:
+            total += 4 - (total % 4)
+        i += total
+
+        if typ != 0x55:  # 'U' = char/string
+            continue
+        ts_str = payload.decode("ascii", errors="replace").strip("\x00")
+        dt = _parse_gpsu(ts_str)
+        if dt and dt.year >= 2020:
+            fixes.append(GpsFix(utc=dt))
+
+    logger.debug("GPMF track: {} valid GPS fixes from stream {}", len(fixes), stream_index)
+    return fixes
 
 
 def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
@@ -134,7 +228,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
                 "-print_format",
                 "json",
                 "-show_entries",
-                "format=duration:format_tags:stream_tags",
+                "format=duration:format_tags:stream_tags:streams",
                 str(path),
             ],
             check=True,
@@ -178,6 +272,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
                 tz = ZoneInfo(timezone)
                 parsed = naive.replace(tzinfo=tz).astimezone(UTC)
         creation_utc = parsed
+
     gps_position = None
     for key in [
         "com.apple.quicktime.location.ISO6709",
@@ -199,12 +294,26 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
         except ValueError:
             gps_position = None
 
+    # Extract GPMF GPS track for accurate GPS-clock timestamps.
+    streams = data.get("streams") or []
+    gpmf_index = _find_gpmf_stream_index(streams)
+    gpmf_track: list[GpsFix] = []
+    gps_source = "none"
+    if gpmf_index is not None:
+        gpmf_track = _extract_gpmf_track(path, gpmf_index)
+        if gpmf_track:
+            gps_source = "gpmf"
+    if not gpmf_track and gps_position is not None:
+        gps_source = "tags"
+
     return GoProVideo(
         path=path,
         duration_s=duration_s,
         creation_utc=creation_utc,
         gps_position=gps_position,
         tags=tags,
+        gpmf_track=gpmf_track,
+        gps_source=gps_source,
     )
 
 
