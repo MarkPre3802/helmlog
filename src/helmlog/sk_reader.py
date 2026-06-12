@@ -41,7 +41,7 @@ from helmlog.nmea2000 import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
 _RAD_TO_DEG: float = 180.0 / math.pi
 _MPS_TO_KTS: float = 1.94384449
@@ -83,6 +83,7 @@ class SKReaderConfig:
     username: str | None = field(default_factory=lambda: os.environ.get("SK_USERNAME"))
     password: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD"))
     password_file: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD_FILE"))
+    on_gps_time: Callable[[datetime], None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +187,11 @@ _PAIR: dict[str, Callable[[dict[str, float], datetime], PGNRecord | None]] = {
 
 
 def process_delta(
-    raw: str, buf: dict[str, float], *, self_context: str | None = None
+    raw: str,
+    buf: dict[str, float],
+    *,
+    self_context: str | None = None,
+    on_gps_time: Callable[[datetime], None] | None = None,
 ) -> list[PGNRecord]:
     """Parse a Signal K delta message; return any records it produces.
 
@@ -264,6 +269,17 @@ def process_delta(
                     logger.warning("SK: bad position value {!r}: {}", value, exc)
                 continue
 
+            if path == "navigation.datetime" and on_gps_time is not None:
+                try:
+                    gps_str = str(value).replace("Z", "+00:00")
+                    gps_dt = datetime.fromisoformat(gps_str)
+                    if gps_dt.tzinfo is None:
+                        gps_dt = gps_dt.replace(tzinfo=UTC)
+                    on_gps_time(gps_dt)
+                except (ValueError, TypeError) as exc:
+                    logger.debug("SK: bad navigation.datetime {!r}: {}", value, exc)
+                continue
+
             if path == "navigation.attitude":
                 # Compound value {roll, pitch, yaw} in radians. Yaw is already
                 # covered by navigation.headingTrue; we only care about
@@ -334,6 +350,7 @@ class SKReader:
         self._buf: dict[str, float] = {}
         self._self_context: str | None = None
         self._token: str | None = None
+        self._on_gps_time = config.on_gps_time
 
     def __aiter__(self) -> AsyncIterator[PGNRecord]:
         return self._stream()
@@ -432,7 +449,10 @@ class SKReader:
                     async for raw in ws:
                         raw_str = str(raw)
                         for record in process_delta(
-                            raw_str, self._buf, self_context=self._self_context
+                            raw_str,
+                            self._buf,
+                            self_context=self._self_context,
+                            on_gps_time=self._on_gps_time,
                         ):
                             yield record
             except asyncio.CancelledError:
