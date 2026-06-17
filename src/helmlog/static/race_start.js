@@ -27,6 +27,26 @@
   let editingDuration = false;
   let rollingResetInFlight = false;
 
+  // Pi/browser clock skew correction for the simrad timer countdown.
+  // The Pi may not have NTP on the water, so its clock can drift from the
+  // browser's clock. We track the server's now_utc from each snapshot and
+  // use it (+ elapsed client time) instead of bare Date.now() for t0_utc
+  // comparisons. This is NOT applied globally via virtualNowMs() because
+  // the FSM simulator already has its own sim_offset_s mechanism and a
+  // global correction would double-count that offset.
+  let _snapshotReceivedAt = Date.now();
+  let _snapshotServerNowMs = null;
+
+  function instrumentNowMs() {
+    if (_snapshotServerNowMs === null) return Date.now();
+    return _snapshotServerNowMs + (Date.now() - _snapshotReceivedAt);
+  }
+
+  function _recordSnapshot(s) {
+    _snapshotReceivedAt = Date.now();
+    if (s && s.now_utc) _snapshotServerNowMs = new Date(s.now_utc).getTime();
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
@@ -63,7 +83,7 @@
     const instr = snapshot && snapshot.simrad_timer;
     if (!instr) return null;
     if (instr.is_running && instr.t0_utc) {
-      return (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
+      return (new Date(instr.t0_utc).getTime() - instrumentNowMs()) / 1000;
     }
     if (!instr.is_running && instr.stopped_remaining_s != null) {
       return instr.stopped_remaining_s;
@@ -85,7 +105,7 @@
     }
 
     if (instr.is_running && instr.t0_utc) {
-      const remaining = (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
+      const remaining = (new Date(instr.t0_utc).getTime() - instrumentNowMs()) / 1000;
       const abs = Math.abs(remaining);
       const sign = remaining >= 0 ? "" : "+";
       clockEl.textContent = sign + fmtMmSs(abs);
@@ -181,7 +201,7 @@
     }
 
     if (instr.is_running && instr.t0_utc) {
-      const remaining = (new Date(instr.t0_utc).getTime() - Date.now()) / 1000;
+      const remaining = (new Date(instr.t0_utc).getTime() - instrumentNowMs()) / 1000;
       const sign = remaining >= 0 ? "" : "+";
       instrStatusEl.innerHTML =
         '<span class="running">Running</span> — ' +
@@ -313,6 +333,7 @@
         throw new Error(data.detail || "HTTP " + r.status);
       }
       snapshot = await r.json();
+      _recordSnapshot(snapshot);
       renderAll();
       showError("");
     } catch (e) {
@@ -343,6 +364,7 @@
     showError("");
     try {
       snapshot = await postJSON(url, body);
+      _recordSnapshot(snapshot);
       renderAll();
     } catch (e) {
       showError(e.message);
