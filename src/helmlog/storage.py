@@ -12,7 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from helmlog.vakaros import VakarosSession
 
 from helmlog.anchors import AnchorError
+from helmlog.clock_sync import IMPORT_SKEW_OK_S, ClockFlag
 from helmlog.nmea2000 import (
     AttitudeRecord,
     COGSOGRecord,
@@ -116,6 +117,23 @@ def _parse_utc(s: str | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+def _reconcile_end_utc(proposed: datetime, last_data: datetime | None, grace_s: float) -> datetime:
+    """Resolve a race's end time, anchoring to the last real data point when a
+    data gap precedes the requested end — power/instrument loss before the race
+    was stopped (#785).
+
+    - No telemetry at all → keep ``proposed`` (nothing to anchor to).
+    - ``proposed`` more than ``grace_s`` after ``last_data`` → use ``last_data``
+      (the boat stopped reporting; everything after is empty wall-clock time).
+    - Otherwise (data still flowing within ``grace_s``) → keep ``proposed``.
+    """
+    if last_data is None:
+        return proposed
+    if (proposed - last_data).total_seconds() > grace_s:
+        return last_data
+    return proposed
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -128,6 +146,18 @@ class StorageConfig:
     db_path: str = field(default_factory=lambda: os.environ.get("DB_PATH", "data/logger.db"))
     rudder_storage_hz: float = field(
         default_factory=lambda: float(os.environ.get("RUDDER_STORAGE_HZ", "2"))
+    )
+    # Race-close reconciliation (#785). When the wall-clock end is more than
+    # ``close_grace_s`` after the last recorded data point, the race is closed
+    # at the last data point instead (power/instrument loss before stop).
+    close_grace_s: float = field(
+        default_factory=lambda: float(os.environ.get("RACE_CLOSE_GRACE_S", "120"))
+    )
+    # On boot, an open race whose last data is older than this is treated as
+    # stale (overnight power loss) and closed; a smaller gap is a quick reboot
+    # mid-race and recording resumes into the same race.
+    boot_resume_window_s: float = field(
+        default_factory=lambda: float(os.environ.get("RACE_BOOT_RESUME_WINDOW_S", "600"))
     )
 
 
@@ -203,7 +233,7 @@ _LIVE_KEYS = (
 # Schema version & migrations
 # ---------------------------------------------------------------------------
 
-_CURRENT_VERSION: int = 87
+_CURRENT_VERSION: int = 90
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -2138,12 +2168,56 @@ _MIGRATIONS: dict[int, str] = {
         ALTER TABLE simrad_timer_state
             ADD COLUMN rolling_timer_on INTEGER NOT NULL DEFAULT 0;
     """,
+    88: """
+        -- Per-race crew capture (#761).
+        -- races.crew_assumed: 1 = lineup is the boat default (unverified for
+        -- this race), 0 = a user explicitly confirmed the lineup. Default 1
+        -- so every historical race shows up as 'assumed' until backfilled.
+        -- races.gear_preset: one preset per race ("dry"/"wet"/"foulies"),
+        -- applied to entries without an explicit gear_weight at confirm time.
+        -- users.gear_default_lbs: per-user fallback when a race entry doesn't
+        -- override gear_weight (e.g. somebody always sails dry).
+        ALTER TABLE races ADD COLUMN crew_assumed INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE races ADD COLUMN gear_preset TEXT;
+        ALTER TABLE users ADD COLUMN gear_default_lbs REAL;
+    """,
+    89: """
+        -- GPS-clock provenance per live recording (#794). The Signal K server
+        -- runs on the Pi, so delta timestamps inherit the host clock, and an
+        -- unsynced boot can stamp a whole recording at the wrong UTC. The
+        -- logger now disciplines record timestamps to GPS time and records the
+        -- outcome here as synced, corrected, unverified, or ref_lost.
+        -- NULL = legacy/imported race (time base not tracked) so no banner.
+        -- (Migration comments must avoid semicolons -- the splitter cuts on them.)
+        ALTER TABLE races ADD COLUMN clock_flag TEXT;
+    """,
+    90: """
+        -- Instrument timer-PGN audit (docs/specs/pgn-audit.md, #789).
+        -- Append-only observation log of B&G/Simrad race-timer PGNs seen on
+        -- the bus, used to confirm Triton2 hardware support from the web UI.
+        -- Read-only and admin-only. Pruned to the newest rows on each insert.
+        CREATE TABLE IF NOT EXISTS pgn_audit (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            observed_at  TEXT NOT NULL,
+            pgn          INTEGER NOT NULL,
+            source_addr  INTEGER NOT NULL,
+            action       TEXT,
+            minutes      INTEGER,
+            decoded      INTEGER NOT NULL DEFAULT 0,
+            raw_hex      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pgn_audit_observed_at ON pgn_audit (observed_at);
+    """,
 }
 
 # Retention window for retired slugs (#449). Requests for a retired slug 301
 # to the current slug while the retirement is within this window; beyond it
 # they 404.
 RACE_SLUG_RETENTION_DAYS: int = 30
+
+# Cap on the pgn_audit observation log (#789) so a long validation session on
+# the Pi can't grow the table without bound. Pruned to this many newest rows.
+_PGN_AUDIT_MAX_ROWS: int = 2000
 
 
 def _split_migration_sql(sql: str) -> list[str]:
@@ -2199,6 +2273,13 @@ class Storage:
         # Active race id, if any. Maintained by start_race / end_race. Used
         # to tag WS position broadcasts so clients can filter by race.
         self._active_race_id: int | None = None
+        # Live GPS-clock discipline, mirrored from the SK reader by the
+        # recording loop (#794 follow-up). Web routes stamp recording-correlated
+        # timestamps (race/audio boundaries) through ``disciplined_now`` so an
+        # unsynced-boot Pi clock can't skew the race window away from the
+        # GPS-disciplined telemetry — the race-203 split.
+        self._clock_offset_s: float = 0.0
+        self._clock_apply: bool = False
         self._live: dict[str, float | None] = dict.fromkeys(_LIVE_KEYS)
         self._live_tw_ref: int | None = None
         self._live_tw_angle_raw: float | None = None
@@ -2290,6 +2371,50 @@ class Storage:
     def session_active(self) -> bool:
         """True when a race or practice session is currently in progress."""
         return self._session_active
+
+    @property
+    def active_race_id(self) -> int | None:
+        """Id of the race currently being recorded, or None when idle (#794)."""
+        return self._active_race_id
+
+    # ------------------------------------------------------------------
+    # GPS-clock discipline for web-route timestamps (#794 follow-up)
+    # ------------------------------------------------------------------
+
+    def update_clock(self, offset_s: float, flag: ClockFlag) -> None:
+        """Mirror the live SK reader's GPS-clock offset onto the storage
+        singleton so web routes can stamp recording-correlated timestamps on the
+        same time base as the telemetry stream.
+
+        The offset is *applied* only when the reader is actively disciplining
+        (``corrected``/``ref_lost``) — exactly ``ClockDiscipliner.apply``'s rule.
+        When the host is trusted (``synced``) or no GPS reference exists yet
+        (``unverified``), routes fall back to raw host time. Called by the
+        recording loop whenever the reader's clock state changes.
+        """
+        self._clock_offset_s = offset_s
+        self._clock_apply = flag in (ClockFlag.CORRECTED, ClockFlag.REF_LOST)
+
+    def discipline_ts(self, host_ts: datetime) -> datetime:
+        """Return the GPS-disciplined equivalent of a host timestamp.
+
+        Mirrors :meth:`helmlog.clock_sync.ClockDiscipliner.apply` so a record
+        stamped by a web route lands on the same time base as the live
+        telemetry stream.
+        """
+        if self._clock_apply:
+            return host_ts + timedelta(seconds=self._clock_offset_s)
+        return host_ts
+
+    def disciplined_now(self) -> datetime:
+        """``datetime.now(UTC)`` disciplined to GPS time (#794 follow-up).
+
+        Web routes use this in place of ``datetime.now(UTC)`` when stamping
+        recording-correlated boundaries (race start/end, audio sessions) so an
+        unsynced-boot Pi clock can't skew the race window away from its own
+        GPS-disciplined telemetry.
+        """
+        return self.discipline_ts(datetime.now(UTC))
 
     # ------------------------------------------------------------------
     # In-memory live instrument cache (always updated, no DB I/O)
@@ -2526,9 +2651,7 @@ class Storage:
             except Exception:
                 logger.warning("Failed to open read connection; falling back to single connection")
                 self._read_db = None
-        current = await self.get_current_race()
-        self._session_active = current is not None
-        self._active_race_id = current.id if current is not None else None
+        await self._reconcile_open_race_on_boot()
         await self.refresh_smoothing()
         await self.refresh_leeway_k()
         await self.refresh_compass_offsets()
@@ -3749,8 +3872,10 @@ class Storage:
             (
                 session.file_path,
                 session.device_name,
-                session.start_utc.isoformat(),
-                session.end_utc.isoformat() if session.end_utc else None,
+                # Discipline the recorder's host-clock stamp to GPS time so audio
+                # boundaries stay consistent with the telemetry stream (#794).
+                self.discipline_ts(session.start_utc).isoformat(),
+                self.discipline_ts(session.end_utc).isoformat() if session.end_utc else None,
                 session.sample_rate,
                 session.channels,
                 race_id,
@@ -3818,11 +3943,14 @@ class Storage:
         )
 
     async def update_audio_session_end(self, session_id: int, end_utc: datetime) -> None:
-        """Set the end_utc for an existing audio session row."""
+        """Set the end_utc for an existing audio session row.
+
+        ``end_utc`` is disciplined to GPS time so it stays on the same time base
+        as the session's ``start_utc`` and the telemetry stream (#794)."""
         db = self._conn()
         await db.execute(
             "UPDATE audio_sessions SET end_utc = ? WHERE id = ?",
-            (end_utc.isoformat(), session_id),
+            (self.discipline_ts(end_utc).isoformat(), session_id),
         )
         await db.commit()
         logger.debug("Audio session {} end_utc updated", session_id)
@@ -3966,17 +4094,28 @@ class Storage:
 
         db = self._conn()
 
-        # Close any open race for this UTC date
+        # Close any open race for this UTC date. If its data stopped well before
+        # this new start (power loss before the prior race was ended), anchor its
+        # end to its last data point rather than spanning to the new gun (#785).
         open_cur = await db.execute(
             "SELECT id FROM races WHERE date = ? AND end_utc IS NULL",
             (date_str,),
         )
         open_row = await open_cur.fetchone()
+        auto_closed: tuple[int, datetime, float] | None = None
         if open_row is not None:
+            prior_last = await self.last_record_utc(open_row["id"])
+            prior_end = _reconcile_end_utc(start_utc, prior_last, self._config.close_grace_s)
             await db.execute(
                 "UPDATE races SET end_utc = ? WHERE id = ?",
-                (start_utc.isoformat(), open_row["id"]),
+                (prior_end.isoformat(), open_row["id"]),
             )
+            if prior_end != start_utc and prior_last is not None:
+                auto_closed = (
+                    open_row["id"],
+                    prior_end,
+                    (start_utc - prior_last).total_seconds() / 60,
+                )
 
         # Insert with NULL slug first; we compute and assign the final slug
         # after the insert so the empty-name fallback can use the row id.
@@ -3992,6 +4131,22 @@ class Storage:
         await db.execute("UPDATE races SET slug = ? WHERE id = ?", (slug, cur.lastrowid))
         await db.commit()
         await self._invalidate_race_cache(cur.lastrowid)
+        if auto_closed is not None:
+            prior_id, prior_end, gap_min = auto_closed
+            await self._invalidate_race_cache(prior_id)
+            logger.warning(
+                "Race {} auto-closed at last data {} on new race start ({:.0f} min gap)",
+                prior_id,
+                prior_end.isoformat(),
+                gap_min,
+            )
+            await self.log_action(
+                "race_auto_close",
+                detail=(
+                    f"Race {prior_id} closed at {prior_end.isoformat()} "
+                    f"(power loss suspected, {gap_min:.0f} min gap) on new race start"
+                ),
+            )
         logger.info("Race started: {} (id={}) type={}", name, cur.lastrowid, session_type)
         self._session_active = True
         self._active_race_id = cur.lastrowid
@@ -4007,8 +4162,100 @@ class Storage:
             slug=slug,
         )
 
-    async def end_race(self, race_id: int, end_utc: datetime) -> None:
-        """Set end_utc on the given race row."""
+    # Telemetry tables carrying a race_id; each is indexed by race_id so the
+    # per-race MAX(ts) below is an indexed lookup, not a scan (#785).
+    _TELEMETRY_TABLES = ("positions", "cogsog", "winds", "speeds", "headings", "depths")
+
+    async def last_record_utc(self, race_id: int) -> datetime | None:
+        """Latest telemetry timestamp recorded for a race, or None if it has no
+        data (#785). Used to anchor a race's end to when data actually stopped."""
+        union = " UNION ALL ".join(
+            f"SELECT MAX(ts) AS m FROM {t} WHERE race_id = ?" for t in self._TELEMETRY_TABLES
+        )
+        cur = await self._read_conn().execute(
+            f"SELECT MAX(m) FROM ({union})",  # noqa: S608 — table names from a fixed tuple
+            tuple([race_id] * len(self._TELEMETRY_TABLES)),
+        )
+        row = await cur.fetchone()
+        return _parse_utc(row[0]) if row and row[0] else None
+
+    async def _record_span_utc(self, race_id: int) -> tuple[datetime, datetime] | None:
+        """(earliest, latest) telemetry timestamp for a race, or None when it has
+        no data. The span the race's boundaries should bracket (#794 follow-up)."""
+        lo_union = " UNION ALL ".join(
+            f"SELECT MIN(ts) AS m FROM {t} WHERE race_id = ?" for t in self._TELEMETRY_TABLES
+        )
+        hi_union = " UNION ALL ".join(
+            f"SELECT MAX(ts) AS m FROM {t} WHERE race_id = ?" for t in self._TELEMETRY_TABLES
+        )
+        params = tuple([race_id] * len(self._TELEMETRY_TABLES))
+        cur = await self._read_conn().execute(
+            f"SELECT MIN(m), MAX(m) FROM ("  # noqa: S608 — table names from a fixed tuple
+            f"SELECT m FROM ({lo_union}) UNION ALL SELECT m FROM ({hi_union}))",
+            params + params,
+        )
+        row = await cur.fetchone()
+        if not row or row[0] is None or row[1] is None:
+            return None
+        first, last = _parse_utc(row[0]), _parse_utc(row[1])
+        if first is None or last is None:
+            return None
+        return first, last
+
+    async def _flag_boundary_clock_skew(self, race_id: int, end_utc: datetime) -> None:
+        """Flag a race whose start/end boundaries disagree with its own telemetry.
+
+        PR #795 disciplines the recording stream to GPS time but a race marked or
+        ended on an unsynced host clock still gets host-time boundaries (the
+        race-203 split: a window 2630s behind its own GPS-correct data). The
+        Vakaros track cross-check (:meth:`_flag_import_clock_skew`) can't catch
+        this — it validates the track, which is already correct — so we compare
+        the boundaries against the recorded data directly.
+
+        The boundaries must bracket the telemetry: data stamped *after* the
+        recorded end, or *well after* the recorded start, means the boundary
+        clock was wrong. When the skew clears ``IMPORT_SKEW_OK_S`` we log it and
+        set ``unverified`` so the session page warns — the same surfacing the
+        track cross-check uses. No telemetry → nothing to compare, leave as-is.
+        """
+        span = await self._record_span_utc(race_id)
+        if span is None:
+            return
+        first, last = span
+        db = self._conn()
+        cur = await db.execute("SELECT start_utc FROM races WHERE id = ?", (race_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return
+        start_utc = _parse_utc(row["start_utc"])
+        if start_utc is None:
+            return
+        # Positive = boundary stamped behind the data it brackets (the skew).
+        # End-after-data and start-before-data are the normal, ignored cases.
+        skew_s = max(
+            (first - start_utc).total_seconds(),
+            (last - end_utc).total_seconds(),
+        )
+        if skew_s <= IMPORT_SKEW_OK_S:
+            return
+        logger.warning(
+            "Race {} clock skew: boundaries {:+.0f}s behind their own telemetry "
+            "— race window host-stamped while the recording was GPS-disciplined (#794)",
+            race_id,
+            skew_s,
+        )
+        await db.execute(
+            "UPDATE races SET clock_flag = ? WHERE id = ?",
+            (ClockFlag.UNVERIFIED.value, race_id),
+        )
+        await db.commit()
+        await self._invalidate_race_cache(race_id)
+
+    async def _close_race(
+        self, race_id: int, end_utc: datetime, *, auto_close_reason: str | None
+    ) -> None:
+        """Write end_utc, invalidate cache, clear active state. When
+        ``auto_close_reason`` is set, also log + audit it for admin review (#785)."""
         db = self._conn()
         await db.execute(
             "UPDATE races SET end_utc = ? WHERE id = ?",
@@ -4016,10 +4263,71 @@ class Storage:
         )
         await db.commit()
         await self._invalidate_race_cache(race_id)
+        await self._flag_boundary_clock_skew(race_id, end_utc)
         self._session_active = False
         if self._active_race_id == race_id:
             self._active_race_id = None
-        logger.info("Race {} ended at {}", race_id, end_utc.isoformat())
+        if auto_close_reason is not None:
+            logger.warning(
+                "Race {} auto-closed at {} ({})", race_id, end_utc.isoformat(), auto_close_reason
+            )
+            await self.log_action(
+                "race_auto_close",
+                detail=f"Race {race_id} closed at {end_utc.isoformat()} ({auto_close_reason})",
+            )
+        else:
+            logger.info("Race {} ended at {}", race_id, end_utc.isoformat())
+
+    async def end_race(self, race_id: int, end_utc: datetime) -> None:
+        """Close a race. When a data gap precedes ``end_utc`` (power/instrument
+        loss before the race was stopped), anchor the end to the last real data
+        point instead of the requested time — #785."""
+        last = await self.last_record_utc(race_id)
+        resolved = _reconcile_end_utc(end_utc, last, self._config.close_grace_s)
+        reason: str | None = None
+        if resolved != end_utc and last is not None:
+            gap_min = (end_utc - last).total_seconds() / 60
+            reason = f"power loss suspected, {gap_min:.0f} min data gap"
+        await self._close_race(race_id, resolved, auto_close_reason=reason)
+
+    async def _reconcile_open_race_on_boot(self) -> None:
+        """Resolve an open race found at startup (#785, decision table B):
+
+        - no open race → idle.
+        - open, no data at all → delete it (started, power died before any record).
+        - open, last data older than ``boot_resume_window_s`` → stale (e.g.
+          overnight power loss): close at last data, do not resume into it.
+        - open, recent data → quick reboot mid-race: keep active, resume recording.
+        """
+        current = await self.get_current_race()
+        if current is None:
+            self._session_active = False
+            self._active_race_id = None
+            return
+        last = await self.last_record_utc(current.id)
+        if last is None:
+            await self.delete_race_session(current.id)
+            logger.warning("Boot: deleted open race {} with no recorded data", current.id)
+            await self.log_action(
+                "race_auto_close",
+                detail=f"Race {current.id} deleted on boot (open, no data recorded)",
+            )
+            self._session_active = False
+            self._active_race_id = None
+            return
+        gap_s = (datetime.now(UTC) - last).total_seconds()
+        if gap_s >= self._config.boot_resume_window_s:
+            await self._close_race(
+                current.id,
+                last,
+                auto_close_reason=f"stale open race on boot, {gap_s / 60:.0f} min since last data",
+            )
+        else:
+            self._session_active = True
+            self._active_race_id = current.id
+            logger.info(
+                "Boot: resuming active race {} ({:.0f}s since last data)", current.id, gap_s
+            )
 
     async def set_race_start_utc(self, race_id: int, start_utc: datetime) -> None:
         """Update the start_utc of a race (#644 — gun anchors session start).
@@ -4037,6 +4345,21 @@ class Storage:
         await db.commit()
         await self._invalidate_race_cache(race_id)
         logger.info("Race {} start_utc anchored to gun at {}", race_id, start_utc.isoformat())
+
+    async def set_race_clock_flag(self, race_id: int, clock_flag: str) -> None:
+        """Persist the GPS-clock provenance of a live recording (#794).
+
+        Called by the logger as the recording's clock state evolves
+        (``unverified`` → ``synced``/``corrected``/``ref_lost``). Idempotent:
+        the logger only calls this when the flag changes.
+        """
+        db = self._conn()
+        await db.execute(
+            "UPDATE races SET clock_flag = ? WHERE id = ?",
+            (clock_flag, race_id),
+        )
+        await db.commit()
+        await self._invalidate_race_cache(race_id)
 
     async def rename_race(
         self,
@@ -4399,10 +4722,12 @@ class Storage:
             session_type=row["session_type"],
             slug=row["slug"] or "",
             renamed_at=(datetime.fromisoformat(row["renamed_at"]) if row["renamed_at"] else None),
+            clock_flag=row["clock_flag"],
         )
 
     _RACE_COLS = (
-        "id, name, event, race_num, date, start_utc, end_utc, session_type, slug, renamed_at"
+        "id, name, event, race_num, date, start_utc, end_utc, session_type, slug, renamed_at,"
+        " clock_flag"
     )
 
     async def get_race(self, race_id: int) -> Race | None:
@@ -4797,6 +5122,104 @@ class Storage:
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # PGN audit (migration 88, #789) — instrument timer-PGN observations
+    # ------------------------------------------------------------------
+
+    async def record_pgn_observation(
+        self,
+        *,
+        observed_at: datetime,
+        pgn: int,
+        source_addr: int,
+        raw_hex: str,
+        action: str | None = None,
+        minutes: int | None = None,
+    ) -> None:
+        """Append one timer-PGN observation; prune to the newest rows.
+
+        ``action`` is the decoded command (set/start/stop/reset/nearest_minute)
+        or None when the frame reassembled but did not decode — ``raw_hex`` is
+        kept either way so a differing instrument layout can be adapted later.
+        """
+        db = self._conn()
+        await db.execute(
+            "INSERT INTO pgn_audit"
+            " (observed_at, pgn, source_addr, action, minutes, decoded, raw_hex)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                observed_at.isoformat(),
+                pgn,
+                source_addr,
+                action,
+                minutes,
+                1 if action is not None else 0,
+                raw_hex,
+            ),
+        )
+        # Bounded log: drop everything older than the newest _PGN_AUDIT_MAX_ROWS.
+        await db.execute(
+            "DELETE FROM pgn_audit WHERE id <= (  SELECT MAX(id) - ? FROM pgn_audit)",
+            (_PGN_AUDIT_MAX_ROWS,),
+        )
+        await db.commit()
+
+    async def get_pgn_audit_summary(self, recent_limit: int = 30) -> dict[str, Any]:
+        """Return per-PGN counts plus the most recent observations.
+
+        Shape::
+
+            {
+              "pgns": {130845: {"frames": int, "decoded": int,
+                                "source_addrs": [int], "last_observed_at": str|None},
+                       130850: {...}},
+              "recent": [{"observed_at", "pgn", "source_addr", "action",
+                          "minutes", "decoded", "raw_hex"}, ...],  # newest first
+              "total": int,
+            }
+        """
+        db = self._read_conn()
+        pgns: dict[int, dict[str, Any]] = {}
+        cur = await db.execute(
+            "SELECT pgn, COUNT(*), SUM(decoded), MAX(observed_at)  FROM pgn_audit GROUP BY pgn"
+        )
+        for pgn, frames, decoded, last in await cur.fetchall():
+            cur2 = await db.execute(
+                "SELECT DISTINCT source_addr FROM pgn_audit WHERE pgn = ? ORDER BY source_addr",
+                (pgn,),
+            )
+            addrs = [int(a[0]) for a in await cur2.fetchall()]
+            pgns[int(pgn)] = {
+                "frames": int(frames),
+                "decoded": int(decoded or 0),
+                "source_addrs": addrs,
+                "last_observed_at": last,
+            }
+        cur3 = await db.execute(
+            "SELECT observed_at, pgn, source_addr, action, minutes, decoded, raw_hex"
+            "  FROM pgn_audit ORDER BY id DESC LIMIT ?",
+            (recent_limit,),
+        )
+        recent = [
+            {
+                "observed_at": r[0],
+                "pgn": int(r[1]),
+                "source_addr": int(r[2]),
+                "action": r[3],
+                "minutes": r[4],
+                "decoded": bool(r[5]),
+                "raw_hex": r[6],
+            }
+            for r in await cur3.fetchall()
+        ]
+        cur4 = await db.execute("SELECT COUNT(*) FROM pgn_audit")
+        total_row = await cur4.fetchone()
+        return {
+            "pgns": pgns,
+            "recent": recent,
+            "total": int(total_row[0]) if total_row else 0,
+        }
 
     async def list_races_for_date(self, date_str: str) -> list[Race]:
         """Return all races for a UTC date string, ordered by start_utc ASC."""
@@ -5286,6 +5709,171 @@ class Storage:
         db = self._conn()
         await db.execute("UPDATE users SET weight_lbs = ? WHERE id = ?", (weight_lbs, user_id))
         await db.commit()
+
+    async def update_user_gear_default(self, user_id: int, gear_default_lbs: float | None) -> None:
+        """Update a user's default per-race gear weight (#761)."""
+        db = self._conn()
+        await db.execute(
+            "UPDATE users SET gear_default_lbs = ? WHERE id = ?",
+            (gear_default_lbs, user_id),
+        )
+        await db.commit()
+
+    # ------------------------------------------------------------------
+    # Per-race crew confirmation (#761)
+    # ------------------------------------------------------------------
+
+    # Gear preset → per-person lbs. From the /spec; folded here rather than
+    # config because the values are a starting point — admin override per
+    # user lives on users.gear_default_lbs.
+    GEAR_PRESET_LBS: dict[str, float] = {
+        "dry": 0.0,
+        "wet": 8.0,
+        "foulies": 18.0,
+    }
+
+    async def confirm_race_crew(
+        self,
+        race_id: int,
+        crew: list[dict[str, Any]],
+        *,
+        gear_preset: str | None = None,
+    ) -> None:
+        """Write a verified per-race crew lineup.
+
+        Stores rows in crew_defaults (race_id=race_id) via the existing
+        set_crew_defaults plumbing, flips races.crew_assumed to 0, and
+        records the gear preset on the race. When *gear_preset* is set and
+        an entry omits gear_weight, the preset's per-person lbs is filled
+        in so the totals on the analysis API are consistent.
+
+        Raises ValueError on an unknown gear_preset or the duplicate-user-id
+        check that set_crew_defaults already performs.
+        """
+        if gear_preset is not None and gear_preset not in self.GEAR_PRESET_LBS:
+            valid = ", ".join(sorted(self.GEAR_PRESET_LBS))
+            raise ValueError(f"gear_preset must be one of: {valid}")
+
+        if gear_preset is not None:
+            preset_lbs = self.GEAR_PRESET_LBS[gear_preset]
+            for entry in crew:
+                if entry.get("gear_weight") is None:
+                    entry["gear_weight"] = preset_lbs
+
+        await self.set_crew_defaults(race_id, crew)
+        db = self._conn()
+        await db.execute(
+            "UPDATE races SET crew_assumed = 0, gear_preset = ? WHERE id = ?",
+            (gear_preset, race_id),
+        )
+        await db.commit()
+        await self._invalidate_race_cache(race_id)
+        logger.debug(
+            "Race {} crew confirmed: {} entries, gear_preset={}",
+            race_id,
+            len(crew),
+            gear_preset,
+        )
+
+    async def get_race_crew_summary(self, race_id: int) -> dict[str, Any]:
+        """Return resolved lineup + assumption flag + weight totals.
+
+        Per-entry weights win; if absent, fall through to users.weight_lbs
+        and users.gear_default_lbs. None totals when no weight is known.
+        """
+        db = self._read_conn()
+        cur = await db.execute(
+            "SELECT crew_assumed, gear_preset FROM races WHERE id = ?",
+            (race_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise ValueError(f"Race {race_id} not found")
+
+        resolved = await self.resolve_crew(race_id)
+
+        total_body: float = 0.0
+        total_gear: float = 0.0
+        body_count = 0
+        gear_count = 0
+        lineup: list[dict[str, Any]] = []
+        for entry in resolved:
+            body_w = entry.get("body_weight")
+            gear_w = entry.get("gear_weight")
+            user_weight_lbs: float | None = None
+            user_gear_lbs: float | None = None
+            if entry.get("user_id") is not None and (body_w is None or gear_w is None):
+                ucur = await db.execute(
+                    "SELECT weight_lbs, gear_default_lbs FROM users WHERE id = ?",
+                    (entry["user_id"],),
+                )
+                urow = await ucur.fetchone()
+                if urow is not None:
+                    user_weight_lbs = urow["weight_lbs"]
+                    user_gear_lbs = urow["gear_default_lbs"]
+            if body_w is None:
+                body_w = user_weight_lbs
+            if gear_w is None:
+                gear_w = user_gear_lbs
+            if body_w is not None:
+                total_body += body_w
+                body_count += 1
+            if gear_w is not None:
+                total_gear += gear_w
+                gear_count += 1
+            lineup.append(
+                {
+                    "position": entry["position"],
+                    "user_id": entry.get("user_id"),
+                    "user_name": entry.get("user_name"),
+                    "attributed": entry.get("attributed"),
+                    "body_weight_lb": body_w,
+                    "gear_weight_lb": gear_w,
+                    "source": entry.get("source"),
+                }
+            )
+
+        body_total = total_body if body_count else None
+        gear_total = total_gear if gear_count else None
+        crew_total: float | None
+        if body_total is not None and gear_total is not None:
+            crew_total = body_total + gear_total
+        elif body_total is not None:
+            crew_total = body_total
+        elif gear_total is not None:
+            crew_total = gear_total
+        else:
+            crew_total = None
+
+        return {
+            "crew_assumed": bool(row["crew_assumed"]),
+            "gear_preset": row["gear_preset"],
+            "lineup": lineup,
+            "total_body_weight_lb": body_total,
+            "total_gear_weight_lb": gear_total,
+            "total_crew_weight_lb": crew_total,
+        }
+
+    async def bulk_confirm_race_crew(
+        self,
+        updates: list[dict[str, Any]],
+    ) -> list[int]:
+        """Apply confirm_race_crew to a batch of races.
+
+        *updates* entries: ``{race_id, crew, gear_preset?}``. Returns the
+        list of race_ids that were updated (in input order). Caller is
+        responsible for emitting one audit_events row per race_id so the
+        protest-readiness trail is per-race.
+        """
+        applied: list[int] = []
+        for u in updates:
+            await self.confirm_race_crew(
+                u["race_id"],
+                u["crew"],
+                gear_preset=u.get("gear_preset"),
+            )
+            applied.append(u["race_id"])
+        return applied
 
     # ------------------------------------------------------------------
     # Boat registry
@@ -6786,7 +7374,7 @@ class Storage:
 
     _USER_COLS = (
         "id, email, name, role, created_at, last_seen,"
-        " avatar_path, is_developer, is_active, weight_lbs, color_scheme"
+        " avatar_path, is_developer, is_active, weight_lbs, gear_default_lbs, color_scheme"
     )
 
     async def get_user_by_id(self, user_id: int) -> dict[str, Any] | None:
@@ -6841,7 +7429,7 @@ class Storage:
     async def list_users(self) -> list[dict[str, Any]]:
         cur = await self._read_conn().execute(
             "SELECT id, email, name, role, created_at, last_seen, is_developer,"
-            " weight_lbs"
+            " weight_lbs, gear_default_lbs"
             " FROM users WHERE email NOT LIKE 'deleted_%@redacted'"
             " ORDER BY created_at"
         )
@@ -9207,13 +9795,20 @@ class Storage:
         db = self._conn()
         anon_email = f"deleted_{user_id}@redacted"
         await db.execute(
-            "UPDATE users SET email = ?, name = NULL, avatar_path = NULL WHERE id = ?",
+            "UPDATE users SET email = ?, name = NULL, avatar_path = NULL,"
+            " weight_lbs = NULL, gear_default_lbs = NULL WHERE id = ?",
             (anon_email, user_id),
         )
         await db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
         await db.execute("DELETE FROM user_credentials WHERE user_id = ?", (user_id,))
         await db.execute(
             "UPDATE invitations SET invited_by = NULL WHERE invited_by = ?", (user_id,)
+        )
+        # data-licensing §1: per-race weight overrides referencing this user
+        # must not survive deletion.
+        await db.execute(
+            "UPDATE crew_defaults SET body_weight = NULL, gear_weight = NULL WHERE user_id = ?",
+            (user_id,),
         )
         await db.commit()
         logger.info("User {} anonymized and sessions deleted", user_id)
@@ -9336,15 +9931,24 @@ class Storage:
         return rows
 
     async def anonymize_sailor(self, user_id: int, replacement: str = "Anonymous") -> int:
-        """Anonymize a crew member by updating their user name. Returns rows updated."""
+        """Anonymize a crew member by updating their user name. Returns rows updated.
+
+        Also clears health-adjacent weight data: users.weight_lbs,
+        users.gear_default_lbs, and any per-race body/gear weight overrides
+        in crew_defaults that reference this user (data-licensing §1).
+        """
         db = self._conn()
         cur = await db.execute(
-            "UPDATE users SET name = ? WHERE id = ?",
+            "UPDATE users SET name = ?, weight_lbs = NULL, gear_default_lbs = NULL WHERE id = ?",
             (replacement, user_id),
         )
         count = cur.rowcount or 0
+        await db.execute(
+            "UPDATE crew_defaults SET body_weight = NULL, gear_weight = NULL WHERE user_id = ?",
+            (user_id,),
+        )
         await db.commit()
-        logger.info("User {} anonymized to {!r}", user_id, replacement)
+        logger.info("User {} anonymized to {!r}; weights cleared", user_id, replacement)
         return count
 
     # ------------------------------------------------------------------
@@ -11727,6 +12331,81 @@ class Storage:
             s["matched_races"] = matches_by_session.get(int(s["id"]), [])
         return sessions
 
+    async def _sample_track(
+        self, table: str, id_col: str, id_val: int, *, target: int = 200
+    ) -> list[tuple[datetime, float, float]]:
+        """Time-ordered, evenly-downsampled ``(ts, lat, lon)`` track (~target points).
+
+        Used by the Vakaros import-skew cross-check (#794). ``table`` is one of
+        the position tables — ``positions`` (live) and ``vakaros_positions``
+        share the ts / latitude_deg / longitude_deg columns. ``table``/``id_col``
+        are internal constants, never user input.
+        """
+        db = self._read_conn()
+        cur = await db.execute(
+            f"SELECT COUNT(*) AS n FROM {table} WHERE {id_col} = ?",  # noqa: S608
+            (id_val,),
+        )
+        row = await cur.fetchone()
+        n = int(row["n"]) if row else 0
+        if n == 0:
+            return []
+        stride = max(1, n // target)
+        cur = await db.execute(
+            f"SELECT ts, latitude_deg, longitude_deg FROM "  # noqa: S608
+            f"(SELECT ts, latitude_deg, longitude_deg, "
+            f"ROW_NUMBER() OVER (ORDER BY ts) AS rn FROM {table} WHERE {id_col} = ?) "
+            f"WHERE rn % ? = 0",
+            (id_val, stride),
+        )
+        out: list[tuple[datetime, float, float]] = []
+        for r in await cur.fetchall():
+            ts = _parse_utc(r["ts"])
+            if ts is not None:
+                out.append((ts, r["latitude_deg"], r["longitude_deg"]))
+        return out
+
+    async def _flag_import_clock_skew(self, session_id: int, race_ids: list[int]) -> None:
+        """Cross-check linked recordings against the GPS-sourced Vakaros track (#794).
+
+        A Vakaros session carries GPS-authoritative time. If a freshly-linked
+        live recording's track is time-shifted relative to it, the recording's
+        clock was wrong (the race-201 incident). Logs a WARNING and, for
+        recordings whose time base was never GPS-tracked (``clock_flag IS
+        NULL``), sets ``unverified`` so the session page warns. Recordings that
+        already carry a real GPS-discipline flag are left as-is (that flag is
+        authoritative) but still logged.
+        """
+        if not race_ids:
+            return
+        from helmlog.clock_sync import IMPORT_SKEW_OK_S, estimate_track_offset_s
+
+        vak_track = await self._sample_track("vakaros_positions", "session_id", session_id)
+        if len(vak_track) < 5:
+            return
+        db = self._conn()
+        changed = False
+        for rid in race_ids:
+            race_track = await self._sample_track("positions", "race_id", rid)
+            offset = estimate_track_offset_s(race_track, vak_track)
+            if offset is None or abs(offset) <= IMPORT_SKEW_OK_S:
+                continue
+            logger.warning(
+                "Race {} clock skew vs Vakaros session {}: {:+.0f}s track offset "
+                "— recording clock likely wrong (#794)",
+                rid,
+                session_id,
+                offset,
+            )
+            cur = await db.execute("SELECT clock_flag FROM races WHERE id = ?", (rid,))
+            row = await cur.fetchone()
+            if row is not None and row["clock_flag"] is None:
+                await db.execute("UPDATE races SET clock_flag = 'unverified' WHERE id = ?", (rid,))
+                await self._invalidate_race_cache(rid)
+                changed = True
+        if changed:
+            await db.commit()
+
     async def match_vakaros_session(self, session_id: int) -> list[int]:
         """Link a Vakaros session to *all* overlapping races.
 
@@ -11797,6 +12476,7 @@ class Storage:
             linked.append(int(cand["id"]))
 
         await db.commit()
+        await self._flag_import_clock_skew(session_id, linked)
         return linked
 
     async def rematch_all_vakaros_sessions(self) -> dict[int, list[int]]:
