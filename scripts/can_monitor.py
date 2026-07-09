@@ -13,21 +13,21 @@ then watch the decoded output here to verify the minutes byte.
 Test send (5 minutes):
     uv run python scripts/can_monitor.py --send-set 5
 """
+
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import can
 
 sys.path.insert(0, "src")
 from helmlog.nmea2000 import (
-    FastPacketBuffer,
     PGN_SIMRAD_SET_TIMER,
     PGN_SIMRAD_START_STOP,
+    FastPacketBuffer,
     decode,
 )
 
@@ -45,10 +45,7 @@ def pgn_from_can_id(can_id: int) -> tuple[int, int]:
     ps = (can_id >> 8) & 0xFF
     pf = (can_id >> 16) & 0xFF
     dp = (can_id >> 24) & 0x01
-    if pf >= 240:
-        pgn = (dp << 16) | (pf << 8) | ps
-    else:
-        pgn = (dp << 16) | (pf << 8)
+    pgn = dp << 16 | pf << 8 | ps if pf >= 240 else dp << 16 | pf << 8
     return pgn, sa
 
 
@@ -97,7 +94,7 @@ def monitor(channel: str, send_minutes: int | None) -> None:
     buf = FastPacketBuffer()
 
     print(f"Opening {channel}  (Ctrl-C to stop)")
-    print(f"Watching PGN 130845 (Set Timer) and 130850 (Start/Stop/Reset)")
+    print("Watching PGN 130845 (Set Timer) and 130850 (Start/Stop/Reset)")
     print(f"[OUT] = our frames (SA=0x{_OUR_SA:02X}), [IN] = B&G / network\n")
 
     with can.Bus(channel=channel, interface="socketcan") as bus:
@@ -113,12 +110,15 @@ def monitor(channel: str, send_minutes: int | None) -> None:
                 continue
 
             direction = "[OUT]" if sa == _OUR_SA else "[IN] "
-            ts = datetime.fromtimestamp(msg.timestamp, tz=timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+            ts = datetime.fromtimestamp(msg.timestamp, tz=UTC).strftime("%H:%M:%S.%f")[:-3]
             frame_byte = msg.data[0] & 0x1F if msg.data else 0
             seq_byte = (msg.data[0] >> 5) & 0x7 if msg.data else 0
             raw = hex_bytes(msg.data)
 
-            print(f"{ts} {direction} PGN {pgn}  SA=0x{sa:02X}  seq={seq_byte} frame={frame_byte}  [{raw}]")
+            print(
+                f"{ts} {direction} PGN {pgn}  SA=0x{sa:02X}  seq={seq_byte} "
+                f"frame={frame_byte}  [{raw}]"
+            )
 
             payload = buf.feed(pgn, sa, bytes(msg.data))
             if payload is not None:
@@ -127,7 +127,9 @@ def monitor(channel: str, send_minutes: int | None) -> None:
                 if rec is not None:
                     if pgn == PGN_SIMRAD_SET_TIMER:
                         mins = getattr(rec, "minutes", None)
-                        print(f"         → SET TIMER  minutes={mins}  (byte[10]=0x{payload[10]:02X})")
+                        print(
+                            f"         → SET TIMER  minutes={mins}  (byte[10]=0x{payload[10]:02X})"
+                        )
                     else:
                         action = getattr(rec, "action", "?")
                         print(f"         → ACTION     {action}")

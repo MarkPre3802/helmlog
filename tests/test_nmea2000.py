@@ -310,7 +310,7 @@ class TestUnitConversions:
 
 
 # ---------------------------------------------------------------------------
-# Simrad/B&G proprietary PGN decoders
+# Simrad/B&G proprietary timer PGNs (130845 / 130850)
 # ---------------------------------------------------------------------------
 
 _MFR = bytes([0x41, 0x9F])
@@ -362,6 +362,13 @@ class TestDecode130850:
         assert isinstance(result, SimradTimerRecord)
         assert result.source_addr == 42
 
+    def test_raw_single_frame_does_not_falsely_decode(self) -> None:
+        # The legacy CAN path passes a RAW (un-reassembled) Fast Packet frame
+        # to decode(); its leading control byte must not match the mfr bytes,
+        # so decode() returns None and the ingest path is unaffected.
+        first_frame = _make_fast_packet(PGN_SIMRAD_START_STOP, 9, _start_stop_payload(0x3D))[0]
+        assert decode(PGN_SIMRAD_START_STOP, first_frame, 9, _UNIX_TS) is None
+
 
 class TestDecode130845:
     def test_set_5_minutes(self) -> None:
@@ -376,7 +383,9 @@ class TestDecode130845:
         assert result.minutes == 10
 
     def test_broadcast_discriminator_ignored(self) -> None:
-        broadcast = _MFR + bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x00, 0x01, 0x9B, 0x09, 0x00, 0x00])
+        broadcast = _MFR + bytes(
+            [0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x00, 0x01, 0x9B, 0x09, 0x00, 0x00]
+        )
         assert decode(PGN_SIMRAD_SET_TIMER, broadcast, 9, _UNIX_TS) is None
 
     def test_wrong_manufacturer_returns_none(self) -> None:
@@ -384,7 +393,8 @@ class TestDecode130845:
         assert decode(PGN_SIMRAD_SET_TIMER, bad, 9, _UNIX_TS) is None
 
     def test_too_short_returns_none(self) -> None:
-        assert decode(PGN_SIMRAD_SET_TIMER, bytes([0x41, 0x9F, 0xFF, 0xFF, 0xFF, 0xFF]), 9, _UNIX_TS) is None
+        too_short = bytes([0x41, 0x9F, 0xFF, 0xFF, 0xFF, 0xFF])
+        assert decode(PGN_SIMRAD_SET_TIMER, too_short, 9, _UNIX_TS) is None
 
 
 # ---------------------------------------------------------------------------

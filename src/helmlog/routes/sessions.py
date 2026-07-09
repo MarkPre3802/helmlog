@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -608,11 +609,26 @@ async def _compute_session_summary(storage: Storage, session_id: int) -> dict[st
     if own_result and not any(str(row.get("sail_number") or "") == str(own_sail) for row in top3):
         results.append(own_result)
 
+    # Crew + gear summary (#761) — let analysis consumers and the session
+    # detail badge distinguish 'verified' from 'assumed default' lineups.
+    crew_summary: dict[str, Any] = {
+        "crew_assumed": True,
+        "gear_preset": None,
+        "lineup": [],
+        "total_body_weight_lb": None,
+        "total_gear_weight_lb": None,
+        "total_crew_weight_lb": None,
+    }
+    # Race row may not be present for non-race session types (debriefs).
+    with contextlib.suppress(ValueError):
+        crew_summary = await storage.get_race_crew_summary(session_id)
+
     return {
         "track": track,
         "events": events,
         "wind": wind,
         "results": results,
+        "crew": crew_summary,
     }
 
 
@@ -1204,6 +1220,12 @@ async def api_session_polar(
             "tws_bins": data.tws_bins,
             "twa_bins": data.twa_bins,
             "session_sample_count": data.session_sample_count,
+            # Effective racing window this was computed over (#812) — lets the
+            # panel show that prestart/post-finish were trimmed and how.
+            "window_start": data.window_start.isoformat(),
+            "window_end": data.window_end.isoformat(),
+            "gun_source": data.gun_source,
+            "finish_source": data.finish_source,
         }
     )
 
@@ -2438,6 +2460,8 @@ async def api_detect_maneuvers(
 
     Returns immediately with the count of detected maneuvers.
     """
+    import sqlite3
+
     storage = get_storage(request)
     from helmlog.maneuver_detector import detect_maneuvers
 
@@ -2447,7 +2471,20 @@ async def api_detect_maneuvers(
     if await cur.fetchone() is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    maneuvers = await detect_maneuvers(storage, session_id)
+    try:
+        maneuvers = await detect_maneuvers(storage, session_id)
+    except sqlite3.OperationalError as exc:
+        # The detect write (write_maneuvers) can lose a race with the live
+        # logger or the startup maneuver-backfill task and fail with
+        # "database is locked". That's transient — surface a retryable 503
+        # instead of an opaque 500 so the UI can prompt the user to retry.
+        if "locked" not in str(exc).lower():
+            raise
+        return JSONResponse(
+            {"detail": "Database is busy; please retry maneuver detection.", "retryable": True},
+            status_code=503,
+            headers={"Retry-After": "3"},
+        )
     return JSONResponse(
         {
             "session_id": session_id,

@@ -50,11 +50,13 @@ def _fast_packet_frames(can_id: int, payload: bytes, seq: int = 0) -> list[can.M
     offset, frame_num = 6, 1
     while offset < len(payload):
         chunk = payload[offset : offset + 7]
-        frames.append(can.Message(
-            arbitration_id=can_id,
-            data=(bytes([seq_bits | frame_num]) + chunk).ljust(8, b"\xff"),
-            is_extended_id=True,
-        ))
+        frames.append(
+            can.Message(
+                arbitration_id=can_id,
+                data=(bytes([seq_bits | frame_num]) + chunk).ljust(8, b"\xff"),
+                is_extended_id=True,
+            )
+        )
         offset += 7
         frame_num += 1
     return frames
@@ -62,7 +64,7 @@ def _fast_packet_frames(can_id: int, payload: bytes, seq: int = 0) -> list[can.M
 
 def _address_claim_name() -> bytes:
     """Build an 8-byte NMEA 2000 NAME for our device."""
-    word0 = 0x00042 | (0x069 << 21)           # identity + manufacturer
+    word0 = 0x00042 | (0x069 << 21)  # identity + manufacturer
     word1 = (120 << 8) | ((120 >> 1) << 17) | (4 << 28) | (1 << 31)  # func/class/marine/arb
     return struct.pack("<II", word0, word1)
 

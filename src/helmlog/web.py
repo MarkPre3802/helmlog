@@ -234,6 +234,7 @@ def create_app(
         network,
         notifications,
         pages,
+        pgn_audit,
         polar,
         race_start,
         race_start_sim,
@@ -281,6 +282,7 @@ def create_app(
         notifications,
         visualizations,
         llm,
+        pgn_audit,
         ws,
     ):
         app.include_router(module.router)

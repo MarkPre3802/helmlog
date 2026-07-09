@@ -238,6 +238,7 @@ async def api_internal_timer_event(
         current = await storage.get_current_race()
         if current is None:
             from helmlog.races import local_today
+
             today = local_today()
             date_str = today.isoformat()
             session_type = "race"
@@ -254,7 +255,9 @@ async def api_internal_timer_event(
     elif body.value == "nearest-minute":
         state = handle_nearest_minute(state, nmea_ts=nmea_ts)
     else:
-        return JSONResponse({"ok": False, "error": f"unknown value {body.value!r}"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "error": f"unknown value {body.value!r}"}, status_code=400
+        )
 
     await storage.upsert_simrad_timer_state(
         instrument_timer_on=state.instrument_timer_on,
@@ -369,7 +372,7 @@ async def api_start(
     now = _now_utc(request)
     storage = get_storage(request)
     row = await storage.get_simrad_timer_state()
-    duration_s = (row["duration_s"] if row and row["duration_s"] else _DEFAULT_DURATION_S)
+    duration_s = row["duration_s"] if row and row["duration_s"] else _DEFAULT_DURATION_S
     rolling_timer_on = row["rolling_timer_on"] if row else False
     instr_on = row["instrument_timer_on"] if row else False
 
@@ -379,6 +382,7 @@ async def api_start(
         await storage.end_race(current.id, now)
 
     from helmlog.races import local_today
+
     today = local_today()
     date_str = today.isoformat()
     session_type = "race"
