@@ -17,17 +17,17 @@ SOURCE_ADDR = 0x3B  # our claimed address
 
 # Commands (byte 6 of PGN 130850 payload)
 COMMANDS = {
-    "start":   0x3D,
-    "stop":    0x3E,
+    "start": 0x3D,
+    "stop": 0x3E,
     "nearest": 0x3F,
-    "reset":   0x40,
+    "reset": 0x40,
 }
 
 
 def make_can_frame(can_id: int, data: bytes) -> bytes:
     """Pack a raw CAN frame for Linux socketcan (struct can_frame)."""
     assert len(data) <= 8
-    data = data.ljust(8, b'\x00')
+    data = data.ljust(8, b"\x00")
     return struct.pack("=IB3x8s", can_id | socket.CAN_EFF_FLAG, len(data), data)
 
 
@@ -50,16 +50,16 @@ def send_address_claim(sock: socket.socket) -> None:
     """
     # NAME: Arbitrary Address Capable, Marine, Display function
     name = (
-        (1 << 63) |    # Arbitrary Address Capable
-        (4 << 60) |    # Industry Group = Marine
-        (0 << 56) |    # System Instance
-        (25 << 49) |   # Device Class = Inter/Intranetwork
-        (0 << 48) |    # Reserved
-        (130 << 40) |  # Device Function = Display
-        (0 << 35) |    # Device Instance Upper
-        (0 << 32) |    # Device Instance Lower
-        (999 << 21) |  # Manufacturer Code (arbitrary)
-        1              # Identity Number
+        (1 << 63)  # Arbitrary Address Capable
+        | (4 << 60)  # Industry Group = Marine
+        | (0 << 56)  # System Instance
+        | (25 << 49)  # Device Class = Inter/Intranetwork
+        | (0 << 48)  # Reserved
+        | (130 << 40)  # Device Function = Display
+        | (0 << 35)  # Device Instance Upper
+        | (0 << 32)  # Device Instance Lower
+        | (999 << 21)  # Manufacturer Code (arbitrary)
+        | 1  # Identity Number
     )
     name_bytes = name.to_bytes(8, "little")
     can_id = 0x18EEFF00 | SOURCE_ADDR
@@ -78,8 +78,9 @@ def send_pgn130850(sock: socket.socket, command_byte: int) -> None:
       [7]    00
       [8-11] FF FF FF FF  padding
     """
-    payload = bytes([0x41, 0x9F, 0xFF, 0xFF, 0x01, 0x17, command_byte, 0x00,
-                     0xFF, 0xFF, 0xFF, 0xFF])
+    payload = bytes(
+        [0x41, 0x9F, 0xFF, 0xFF, 0x01, 0x17, command_byte, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]
+    )
 
     # Fast Packet: priority=2, PGN=0x1FF22, src=SOURCE_ADDR
     # PDU2: PF=0xFF, PS=0x22 → CAN ID = (2<<26)|(0xFF<<16)|(0x22<<8)|SOURCE_ADDR
@@ -88,7 +89,7 @@ def send_pgn130850(sock: socket.socket, command_byte: int) -> None:
     # Frame 0: [seq|frame0, total_len, payload[0:6]]
     frame0 = bytes([0x00, len(payload)]) + payload[0:6]
     # Frame 1: [seq|frame1, payload[6:13]]
-    frame1 = bytes([0x01]) + payload[6:] + b'\xFF' * (7 - len(payload[6:]))
+    frame1 = bytes([0x01]) + payload[6:] + b"\xff" * (7 - len(payload[6:]))
 
     send_frame(sock, can_id, frame0)
     time.sleep(0.005)

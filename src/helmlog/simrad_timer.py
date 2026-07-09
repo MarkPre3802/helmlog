@@ -56,7 +56,9 @@ def handle_running(
     Resume after stop: t0_utc = nmea_ts + stopped_remaining_s.
     """
     if state.duration_s is None:
-        raise ValueError("cannot start timer: no duration set (racing.startTimer.duration not received)")
+        raise ValueError(
+            "cannot start timer: no duration set (racing.startTimer.duration not received)"
+        )
 
     if state.stopped_remaining_s is not None:
         x = state.stopped_remaining_s
