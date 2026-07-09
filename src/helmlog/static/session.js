@@ -7094,6 +7094,7 @@ let _bsParams = null;       // parameter definitions from /api/boat-settings/par
 let _bsResolved = null;     // resolved settings at current playback time
 let _bsLastAsOf = null;     // debounce: last as_of value we fetched
 let _bsHistory = null;      // all race-specific setting entries (full timeline)
+let _bsEditing = false;     // true while edit form is shown
 
 async function loadBoatSettings() {
   const card = document.getElementById('boat-settings-card');
@@ -7127,6 +7128,7 @@ async function _fetchAndRenderBoatSettings(asOf) {
 }
 
 function _renderBoatSettingsPanel() {
+  if (_bsEditing) return;
   const body = document.getElementById('boat-settings-body');
   if (!_bsParams || !_bsResolved) return;
 
@@ -7271,6 +7273,119 @@ function toggleSetupCatSession(cat) {
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? '' : 'none';
   if (chev) chev.textContent = hidden ? '\u25BC' : '\u25B6';
+}
+
+// ---------------------------------------------------------------------------
+// Boat setup edit mode (#boat-setup-edit)
+// ---------------------------------------------------------------------------
+
+function enterBoatSettingsEditMode() {
+  if (!_bsParams) return;
+  _bsEditing = true;
+  // Expand section if collapsed
+  _applySectionState('boat-settings', false);
+  const editBtn = document.getElementById('bs-edit-btn');
+  if (editBtn) editBtn.style.display = 'none';
+  _renderBoatSettingsEditForm();
+}
+
+function _renderBoatSettingsEditForm() {
+  const body = document.getElementById('boat-settings-body');
+  if (!body || !_bsParams) return;
+
+  const byParam = {};
+  for (const entry of (_bsResolved || [])) byParam[entry.parameter] = entry;
+
+  let html = '<div id="bs-edit-form">';
+
+  for (const cat of _bsParams.categories) {
+    html += '<div class="setup-cat-header" style="cursor:default">';
+    html += '<span class="setup-cat-label">' + esc(cat.label) + '</span>';
+    html += '</div>';
+    html += '<div class="setup-cat-body">';
+    for (const p of cat.parameters) {
+      const currentVal = byParam[p.name] ? byParam[p.name].value : '';
+      html += '<div class="bs-row">';
+      html += '<label class="bs-label" for="bs-edit-' + p.name + '">' + esc(p.label) + '</label>';
+      if (p.input_type === 'preset') {
+        const presets = (p.preset_values && p.preset_values.length) ? p.preset_values : (_bsParams.weight_distribution_presets || []);
+        html += '<select id="bs-edit-' + p.name + '" data-param="' + p.name + '" data-original="' + esc(currentVal) + '" class="bs-edit-input" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:2px 6px;font-size:.8rem">';
+        html += '<option value="">\u2014 not set \u2014</option>';
+        for (const pv of presets) {
+          html += '<option value="' + esc(pv) + '"' + (currentVal === pv ? ' selected' : '') + '>' + esc(pv) + '</option>';
+        }
+        html += '</select>';
+      } else {
+        html += '<input type="number" step="any" id="bs-edit-' + p.name + '" data-param="' + p.name + '" data-original="' + esc(currentVal) + '" class="bs-edit-input" value="' + esc(currentVal) + '" style="background:var(--bg-input);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);padding:2px 6px;font-size:.8rem;width:80px">';
+      }
+      if (p.unit) html += '<span class="bs-unit">' + esc(p.unit) + '</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  html += '<div style="margin-top:12px;display:flex;gap:8px;align-items:center">';
+  html += '<button onclick="saveBoatSettings()" style="background:var(--accent);color:var(--bg-primary);border:none;border-radius:4px;padding:5px 14px;font-size:.78rem;cursor:pointer">Save Changes</button>';
+  html += '<button onclick="cancelBoatSettingsEdit()" style="background:var(--bg-input);color:var(--text-secondary);border:1px solid var(--border);border-radius:4px;padding:5px 14px;font-size:.78rem;cursor:pointer">Cancel</button>';
+  html += '<span id="bs-edit-status" style="font-size:.75rem;color:var(--text-secondary)"></span>';
+  html += '</div>';
+  html += '</div>';
+
+  body.innerHTML = html;
+}
+
+async function saveBoatSettings() {
+  const inputs = document.querySelectorAll('#bs-edit-form .bs-edit-input');
+  const entries = [];
+  const now = new Date().toISOString();
+
+  for (const inp of inputs) {
+    const param = inp.dataset.param;
+    const original = inp.dataset.original;
+    const newVal = inp.value.trim();
+    if (newVal === '' || newVal === original) continue;
+    entries.push({ts: now, parameter: param, value: newVal});
+  }
+
+  if (!entries.length) {
+    cancelBoatSettingsEdit();
+    return;
+  }
+
+  const statusEl = document.getElementById('bs-edit-status');
+  statusEl.textContent = 'Saving\u2026';
+  statusEl.style.color = 'var(--text-secondary)';
+
+  try {
+    const resp = await fetch('/api/boat-settings', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({race_id: parseInt(SESSION_ID, 10), source: 'manual', entries}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      statusEl.textContent = 'Error: ' + (err.detail || resp.status);
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
+  } catch (e) {
+    statusEl.textContent = 'Network error';
+    statusEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  _bsEditing = false;
+  const editBtn = document.getElementById('bs-edit-btn');
+  if (editBtn) editBtn.style.display = '';
+  const asOf = _session.end_utc || new Date().toISOString();
+  await _fetchAndRenderBoatSettings(asOf);
+}
+
+function cancelBoatSettingsEdit() {
+  _bsEditing = false;
+  const editBtn = document.getElementById('bs-edit-btn');
+  if (editBtn) editBtn.style.display = '';
+  _renderBoatSettingsPanel();
 }
 
 // Called when the playback position changes (track click or video sync)

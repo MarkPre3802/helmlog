@@ -65,6 +65,7 @@ async def api_boat_settings_parameters(
                 "label": ctrl["label"],
                 "unit": ctrl["unit"],
                 "input_type": ctrl["input_type"],
+                "preset_values": ctrl.get("preset_values") or [],
             }
         )
 

@@ -488,7 +488,12 @@ body.live-race #session-tags-row{display:none!important}
 </div>
 
 <div class="card" id="boat-settings-card" style="display:none">
-  <div class="section-title" onclick="toggleSection('boat-settings')">Boat Setup <span id="boat-settings-toggle">&#9654;</span></div>
+  <div style="display:flex;align-items:center;justify-content:space-between">
+    <div class="section-title" style="margin-bottom:0" onclick="toggleSection('boat-settings')">Boat Setup <span id="boat-settings-toggle">&#9654;</span></div>
+    {% if user_role in ['crew', 'admin'] %}
+    <button id="bs-edit-btn" onclick="enterBoatSettingsEditMode()" style="font-size:.72rem;color:var(--accent);background:none;border:none;cursor:pointer;padding:2px 0">&#9998; Edit</button>
+    {% endif %}
+  </div>
   <div class="section-body" id="boat-settings-body" style="display:none"></div>
 </div>
 

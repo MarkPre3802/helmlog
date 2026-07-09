@@ -2909,6 +2909,16 @@ async def test_boat_settings_parameters(storage: Storage) -> None:
     cats = [c["category"] for c in data["categories"]]
     assert "sail_controls" in cats
     assert "rig" in cats
+    # Each parameter dict must include preset_values so the edit form can build
+    # select options without special-casing on the client side.
+    for cat in data["categories"]:
+        for p in cat["parameters"]:
+            assert "preset_values" in p, f"{p['name']} missing preset_values"
+    # weight_distribution is the only preset-type param; it should have options.
+    crew_cat = next(c for c in data["categories"] if c["category"] == "crew")
+    wd = next(p for p in crew_cat["parameters"] if p["name"] == "weight_distribution")
+    assert wd["input_type"] == "preset"
+    assert len(wd["preset_values"]) > 0
 
 
 @pytest.mark.asyncio
@@ -3103,6 +3113,68 @@ async def test_boat_settings_resolve(storage: Storage) -> None:
         # vang: boat-level fallback
         assert by_param["vang"]["value"] == "2.0"
         assert by_param["vang"]["supersedes_value"] is None
+
+
+@pytest.mark.asyncio
+async def test_boat_settings_edit_flow(storage: Storage) -> None:
+    """Editing boat setup via the session review page posts new entries.
+
+    Simulates the UI action: user opens the edit form, changes several
+    values, saves.  Each changed parameter is posted with source="manual"
+    and the current timestamp.  The /current endpoint then returns the new
+    values; old values are preserved in history but no longer current.
+    """
+    app = create_app(storage)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        race_id = await _make_race_for_settings(client)
+        ts_original = _BS_START_UTC.isoformat()
+        ts_edit = datetime(2026, 3, 12, 15, 0, 0, tzinfo=UTC).isoformat()
+
+        # Original values recorded at the dock
+        await client.post(
+            "/api/boat-settings",
+            json={
+                "race_id": race_id,
+                "source": "manual",
+                "entries": [
+                    {"ts": ts_original, "parameter": "backstay", "value": "3.0"},
+                    {"ts": ts_original, "parameter": "vang", "value": "2.0"},
+                    {"ts": ts_original, "parameter": "outhaul", "value": "1.5"},
+                ],
+            },
+        )
+
+        # User edits backstay and vang post-race; outhaul unchanged (not submitted)
+        resp = await client.post(
+            "/api/boat-settings",
+            json={
+                "race_id": race_id,
+                "source": "manual",
+                "entries": [
+                    {"ts": ts_edit, "parameter": "backstay", "value": "4.5"},
+                    {"ts": ts_edit, "parameter": "vang", "value": "3.0"},
+                ],
+            },
+        )
+        assert resp.status_code == 201
+        assert len(resp.json()["ids"]) == 2
+
+        # /current must reflect the edited values
+        resp = await client.get(f"/api/boat-settings/current?race_id={race_id}")
+        assert resp.status_code == 200
+        by_param = {r["parameter"]: r for r in resp.json()}
+        assert by_param["backstay"]["value"] == "4.5"
+        assert by_param["vang"]["value"] == "3.0"
+        assert by_param["outhaul"]["value"] == "1.5"  # unchanged
+
+        # Full history keeps both entries for edited params
+        resp = await client.get(f"/api/boat-settings?race_id={race_id}")
+        assert resp.status_code == 200
+        all_entries = resp.json()
+        backstay_entries = [e for e in all_entries if e["parameter"] == "backstay"]
+        assert len(backstay_entries) == 2
 
 
 @pytest.mark.asyncio
