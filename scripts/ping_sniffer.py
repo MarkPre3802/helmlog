@@ -10,7 +10,7 @@ display.  After capture it shows:
     (not just the last one), so nothing is discarded.
 
 Usage:
-    uv run python scripts/ping_sniffer.py [--channel can0]
+    uv run python scripts/ping_sniffer.py [--channel can0] [--output /tmp/sniffer_out.txt]
 
 Workflow:
     1. Start this script.
@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime
-from typing import NamedTuple
+from typing import IO, NamedTuple
 
 import can
 
@@ -167,31 +167,34 @@ def _rel(ts: float, mark_ts: float) -> str:
     return f"{d:+.3f}s"
 
 
-def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf) -> None:
+def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] = sys.stdout) -> None:
+    def p(*args: object, **kwargs: object) -> None:
+        print(*args, **kwargs, file=out)
+
     if not marks:
-        print("\nNo marks recorded — nothing to summarise.")
+        p("\nNo marks recorded — nothing to summarise.")
         return
 
     for mark in marks:
         label_name = "BOAT END" if mark.label == "b" else "PIN END"
         ts_str = datetime.fromtimestamp(mark.ts, tz=UTC).strftime("%H:%M:%S.%f")[:-3]
 
-        print(f"\n{'='*70}")
-        print(f"  Mark: {label_name}  at {ts_str} UTC")
-        print(f"{'='*70}")
+        p(f"\n{'='*70}")
+        p(f"  Mark: {label_name}  at {ts_str} UTC")
+        p(f"{'='*70}")
 
         # --- Inner window: per-frame detail with raw bytes ---
         inner = [f for f in frames if abs(f.ts - mark.ts) <= INNER]
-        print(f"\n  INNER ±{INNER}s ({len(inner)} frames) — raw bytes per frame:\n")
+        p(f"\n  INNER ±{INNER}s ({len(inner)} frames) — raw bytes per frame:\n")
 
         # Highlight any unicast (PDU1) messages — these are the ones we may have missed
         unicast = [f for f in inner if f.da != 0xFF]
         if unicast:
-            print("  *** UNICAST (addressed) messages — DA shown: ***")
+            p("  *** UNICAST (addressed) messages — DA shown: ***")
             for f in unicast:
-                print(f"    {_rel(f.ts, mark.ts)}  PGN {f.pgn:6d} (0x{f.pgn:05X})  "
-                      f"SA=0x{f.sa:02X}→DA=0x{f.da:02X}  {_hex(f.data)}")
-            print()
+                p(f"    {_rel(f.ts, mark.ts)}  PGN {f.pgn:6d} (0x{f.pgn:05X})  "
+                  f"SA=0x{f.sa:02X}→DA=0x{f.da:02X}  {_hex(f.data)}")
+            p()
 
         if inner:
             by_pgn_inner: dict[tuple[int, int, int], list[Frame]] = collections.defaultdict(list)
@@ -199,11 +202,11 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf) -> None:
                 by_pgn_inner[(f.pgn, f.sa, f.da)].append(f)
             for (pgn, sa, da), flist in sorted(by_pgn_inner.items()):
                 da_str = f"→DA=0x{da:02X}" if da != 0xFF else ""
-                print(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}:")
+                p(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}:")
                 for f in flist:
-                    print(f"    {_rel(f.ts, mark.ts)}  {_hex(f.data)}")
+                    p(f"    {_rel(f.ts, mark.ts)}  {_hex(f.data)}")
         else:
-            print("  (no frames in inner window — try pressing the key sooner)")
+            p("  (no frames in inner window — try pressing the key sooner)")
 
         # --- Outer window: PGN summary with ALL unique payloads ---
         outer = [f for f in frames if abs(f.ts - mark.ts) <= OUTER]
@@ -211,12 +214,12 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf) -> None:
         for f in outer:
             by_pgn[(f.pgn, f.sa, f.da)].append(f)
 
-        print(f"\n  OUTER ±{OUTER}s ({len(outer)} frames) — all reassembled payloads:\n")
+        p(f"\n  OUTER ±{OUTER}s ({len(outer)} frames) — all reassembled payloads:\n")
         for (pgn, sa, da), flist in sorted(by_pgn.items()):
             key = (pgn, sa)
             da_str = f"→DA=0x{da:02X}" if da != 0xFF else ""
             completions = [
-                (t, p) for t, p in fp.completed.get(key, [])
+                (t, pt) for t, pt in fp.completed.get(key, [])
                 if abs(t - mark.ts) <= OUTER
             ]
 
@@ -227,21 +230,21 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf) -> None:
                     d = f.data
                     if d not in unique_raw:
                         unique_raw[d] = f.ts
-                print(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}  ×{len(flist):3d}  [single-frame]")
+                p(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}  ×{len(flist):3d}  [single-frame]")
                 for raw_bytes, first_ts in unique_raw.items():
-                    print(f"    {_rel(first_ts, mark.ts)}  {_hex(raw_bytes)}")
+                    p(f"    {_rel(first_ts, mark.ts)}  {_hex(raw_bytes)}")
             else:
-                print(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}  ×{len(flist):3d}")
+                p(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}  ×{len(flist):3d}")
                 if completions:
                     # Deduplicate payloads but show first occurrence time
                     seen: dict[bytes, float] = {}
-                    for t, p in completions:
-                        if p not in seen:
-                            seen[p] = t
+                    for t, pt in completions:
+                        if pt not in seen:
+                            seen[pt] = t
                     for payload, first_ts in seen.items():
-                        print(f"    {_rel(first_ts, mark.ts)}  {_hex(payload)}")
+                        p(f"    {_rel(first_ts, mark.ts)}  {_hex(payload)}")
                 else:
-                    print("    (no complete fast-packet payload captured)")
+                    p("    (no complete fast-packet payload captured)")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,8 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Broadband CAN sniffer for B&G line pings")
     ap.add_argument("--channel", default="can0")
+    ap.add_argument("--output", default="/tmp/sniffer_out.txt",
+                    help="Also write summary to this file (default: /tmp/sniffer_out.txt)")
     args = ap.parse_args()
 
     frames: list[Frame] = []
@@ -295,6 +300,11 @@ def main() -> None:
 
     print(f"\nCapture complete: {len(frames)} frames, {len(marks)} mark(s).")
     _summarise(frames, marks, fp)
+
+    with open(args.output, "w") as f:
+        f.write(f"Capture complete: {len(frames)} frames, {len(marks)} mark(s).\n")
+        _summarise(frames, marks, fp, out=f)
+    print(f"[Summary also written to {args.output}]")
 
 
 if __name__ == "__main__":
