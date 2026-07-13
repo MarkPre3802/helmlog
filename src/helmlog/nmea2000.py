@@ -208,10 +208,12 @@ class SimradTimerRecord:
 
     Payload layout (from candump analysis; both PGNs are Fast Packet):
 
-    Start/Stop/Reset/Nearest-Minute  (PGN 130850, 12 bytes after reassembly):
+    Start/Stop/Reset/Nearest-Minute/Line-Ping  (PGN 130850, 12 bytes after
+    reassembly):
         [0-1]  41 9F        Simrad manufacturer ID (little-endian 0x9F41)
         [2-5]  FF FF 01 17  reserved
-        [6]    3D=start / 3E=stop / 3F=nearest-minute / 40=reset
+        [6]    3D=start / 3E=stop / 3F=nearest-minute / 40=reset /
+               71=boat-end ping / 70=pin-end ping
 
     Set Timer  (PGN 130845, 14 bytes after reassembly):
         [0-1]  41 9F        Simrad manufacturer ID
@@ -228,6 +230,7 @@ class SimradTimerRecord:
     source_addr: int
     timestamp: datetime
     action: str  # "set" | "start" | "stop" | "reset" | "nearest_minute"
+    #      | "boat_end_ping" | "pin_end_ping"
     minutes: int | None  # populated only when action == "set"
 
 
@@ -545,6 +548,8 @@ _SIMRAD_ACTIONS: Final[dict[int, str]] = {
     0x3E: "stop",
     0x3F: "nearest_minute",
     0x40: "reset",
+    0x71: "boat_end_ping",
+    0x70: "pin_end_ping",
 }
 _SIMRAD_SET_DISCRIMINATOR: Final[bytes] = bytes([0x07, 0x42, 0x00, 0x01])
 

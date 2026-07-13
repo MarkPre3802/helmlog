@@ -347,6 +347,16 @@ class TestDecode130850:
         assert isinstance(result, SimradTimerRecord)
         assert result.action == "reset"
 
+    def test_boat_end_ping(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x71), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "boat_end_ping"
+
+    def test_pin_end_ping(self) -> None:
+        result = decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x70), 9, _UNIX_TS)
+        assert isinstance(result, SimradTimerRecord)
+        assert result.action == "pin_end_ping"
+
     def test_unknown_command_returns_none(self) -> None:
         assert decode(PGN_SIMRAD_START_STOP, _start_stop_payload(0x00), 9, _UNIX_TS) is None
 

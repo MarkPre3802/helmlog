@@ -621,6 +621,7 @@ async def _ping(
         detail=f"{lat:.6f},{lon:.6f}",
         user=user,
     )
+    await _bg_send(request, f"{end_kind}_end_ping")
     return JSONResponse(await _build_snapshot(request))
 
 

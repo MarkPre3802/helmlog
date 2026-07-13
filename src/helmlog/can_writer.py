@@ -30,8 +30,12 @@ _CMD_START = 0x3D
 _CMD_STOP = 0x3E
 _CMD_NEAREST_MINUTE = 0x3F
 _CMD_RESET = 0x40
+_CMD_BOAT_END_PING = 0x71
+_CMD_PIN_END_PING = 0x70
 
-TimerCommand = Literal["start", "stop", "reset", "nearest-minute", "set"]
+TimerCommand = Literal[
+    "start", "stop", "reset", "nearest-minute", "set", "boat_end_ping", "pin_end_ping"
+]
 
 
 def _fast_packet_frames(can_id: int, payload: bytes, seq: int = 0) -> list[can.Message]:
@@ -140,6 +144,8 @@ class CANWriter:
                 "stop": _CMD_STOP,
                 "reset": _CMD_RESET,
                 "nearest-minute": _CMD_NEAREST_MINUTE,
+                "boat_end_ping": _CMD_BOAT_END_PING,
+                "pin_end_ping": _CMD_PIN_END_PING,
             }[command]
             payload = bytes(
                 [0x41, 0x9F, 0xFF, 0xFF, 0x01, 0x17, cmd_byte, 0x00, 0x00, 0x00, 0x00, 0x00]

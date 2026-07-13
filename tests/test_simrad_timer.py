@@ -37,8 +37,10 @@ def _record(action: str, minutes: int | None = None) -> SimradTimerRecord:
 
 def _make_publisher() -> tuple[sut.HelmLogPublisher, AsyncMock]:
     pub = sut.HelmLogPublisher.__new__(sut.HelmLogPublisher)
+    pub._base_url = "http://test"  # type: ignore[attr-defined]
     pub._url = "http://test/api/internal/timer-event"  # type: ignore[attr-defined]
     pub._headers = {}  # type: ignore[attr-defined]
+    pub._ping_headers = {}  # type: ignore[attr-defined]
     mock_response = MagicMock()
     mock_response.raise_for_status = MagicMock()
     mock_response.elapsed = MagicMock()
@@ -51,6 +53,10 @@ def _make_publisher() -> tuple[sut.HelmLogPublisher, AsyncMock]:
 
 def _posted_body(mock_client: AsyncMock) -> dict:
     return mock_client.post.call_args.kwargs["json"]
+
+
+def _posted_url(mock_client: AsyncMock) -> str:
+    return mock_client.post.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -101,3 +107,28 @@ async def test_publish_set_6_minutes() -> None:
     await pub.publish(_record("set", minutes=6))
     body = _posted_body(client)
     assert body["value"] == 360
+
+
+@pytest.mark.asyncio
+async def test_publish_boat_end_ping_posts_to_ping_boat_endpoint() -> None:
+    pub, client = _make_publisher()
+    await pub.publish(_record("boat_end_ping"))
+    assert _posted_url(client) == "http://test/api/race-start/ping/boat"
+    assert _posted_body(client) == {}
+
+
+@pytest.mark.asyncio
+async def test_publish_pin_end_ping_posts_to_ping_pin_endpoint() -> None:
+    pub, client = _make_publisher()
+    await pub.publish(_record("pin_end_ping"))
+    assert _posted_url(client) == "http://test/api/race-start/ping/pin"
+    assert _posted_body(client) == {}
+
+
+@pytest.mark.asyncio
+async def test_publish_ping_uses_ping_headers_not_timer_headers() -> None:
+    pub, client = _make_publisher()
+    pub._headers = {"Authorization": "Bearer timer-token"}  # type: ignore[attr-defined]
+    pub._ping_headers = {"Authorization": "Bearer ping-token"}  # type: ignore[attr-defined]
+    await pub.publish(_record("boat_end_ping"))
+    assert client.post.call_args.kwargs["headers"] == {"Authorization": "Bearer ping-token"}

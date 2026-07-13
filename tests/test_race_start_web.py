@@ -442,6 +442,66 @@ async def test_viewer_template_shows_readonly_banner(storage: Storage) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ping outbound CAN — B&G Integration toggle gates the write direction
+# ---------------------------------------------------------------------------
+
+
+class _FakeCANWriter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def send(self, command: str, minutes: int | None = None) -> None:
+        self.calls.append((command, minutes))
+
+
+@pytest.mark.asyncio
+async def test_ping_boat_sends_can_when_instrument_timer_on(storage: Storage) -> None:
+    can_writer = _FakeCANWriter()
+    app = create_app(storage, can_writer=can_writer)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post("/api/race-start/instrument-timer", json={"on": True})
+        r = await client.post(
+            "/api/race-start/ping/boat",
+            json={"latitude_deg": 47.65, "longitude_deg": -122.40},
+        )
+    assert r.status_code == 200
+    assert can_writer.calls == [("boat_end_ping", None)]
+
+
+@pytest.mark.asyncio
+async def test_ping_pin_sends_can_when_instrument_timer_on(storage: Storage) -> None:
+    can_writer = _FakeCANWriter()
+    app = create_app(storage, can_writer=can_writer)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post("/api/race-start/instrument-timer", json={"on": True})
+        r = await client.post(
+            "/api/race-start/ping/pin",
+            json={"latitude_deg": 47.65, "longitude_deg": -122.40},
+        )
+    assert r.status_code == 200
+    assert can_writer.calls == [("pin_end_ping", None)]
+
+
+@pytest.mark.asyncio
+async def test_ping_does_not_send_can_when_instrument_timer_off(storage: Storage) -> None:
+    can_writer = _FakeCANWriter()
+    app = create_app(storage, can_writer=can_writer)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            "/api/race-start/ping/boat",
+            json={"latitude_deg": 47.65, "longitude_deg": -122.40},
+        )
+    assert r.status_code == 200
+    assert can_writer.calls == []
+
+
+# ---------------------------------------------------------------------------
 # Start-line carry-over
 # ---------------------------------------------------------------------------
 

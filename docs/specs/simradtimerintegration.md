@@ -50,8 +50,8 @@ All timer state is stored in the `simrad_timer_state` table (singleton row, id=1
 | **Stop Race** | Stop timer; store `stopped_remaining_s`; end current race | `stop` (PGN 130850) |
 | **Reset** | Reset `t0_utc` to `now + duration_s` (if running) or clear `stopped_remaining_s` (if stopped); does not change running state | `reset` (PGN 130850) |
 | **Sync** | Snap running timer to nearest whole minute (rounds `remaining` to nearest 60 s and recomputes `t0_utc`) | `nearest-minute` (PGN 130850) |
-| **Boat-end ping** | Record GPS position as boat-end of start line | — |
-| **Pin-end ping** | Record GPS position as pin-end of start line | — |
+| **Boat-end ping** | Record GPS position as boat-end of start line | `boat_end_ping` (PGN 130850, cmd byte `0x71`) |
+| **Pin-end ping** | Record GPS position as pin-end of start line | `pin_end_ping` (PGN 130850, cmd byte `0x70`) |
 
 ### Set Start Value
 
@@ -141,6 +141,10 @@ All calculations use the NMEA UTC time taken from the CAN hardware frame timesta
 
 **WHEN** `racing.startTimer.state = "nearest-minute"` is received, HelmLog SHALL move the timer to the nearest whole minute using the NMEA timestamp, without changing running state.
 
+**WHEN** a B&G boat-end or pin-end ping is received, HelmLog SHALL record it via the existing manual ping path — the bridge POSTs to `/api/race-start/ping/boat` or `/api/race-start/ping/pin` (not `/api/internal/timer-event`) with no lat/lon, so the server falls back to `storage.latest_position()`. The B&G event is a bare trigger, not a position source. This reuses `StartLine`/`add_start_line_ping` unchanged — line pings are stored and displayed identically regardless of source, and carry over to consecutive same-date races (#702/#703) exactly like a manual ping.
+
+**WHILE** the Instrument Timer toggle is OFF, inbound B&G ping events SHALL be ignored, same as all other inbound B&G events.
+
 ---
 
 ## HelmLog → B&G (outbound commands)
@@ -154,6 +158,8 @@ When the Instrument Timer toggle is **ON** and a CAN writer is available, the fo
 | Reset | `reset` | 130850 |
 | Sync | `nearest-minute` | 130850 |
 | Set Start Value (confirm) | `set` with `minutes = duration_s / 60` | 130845 |
+| Boat-end ping | `boat_end_ping` | 130850 |
+| Pin-end ping | `pin_end_ping` | 130850 |
 
 When the toggle is OFF, no outbound commands are sent.
 
@@ -189,3 +195,7 @@ When HelmLog sends a command to B&G (e.g. `stop` from Stop Race), the bridge wil
 sudo cp ~/helmlog/scripts/simrad-timer.service /etc/systemd/system/simrad-timer.service
 sudo systemctl daemon-reload && sudo systemctl restart simrad-timer
 ```
+
+**Line-ping byte layout**: cmd byte `0x71` (boat end) / `0x70` (pin end) on PGN 130850 — the same Fast Packet PGN and payload shape as start/stop/reset/nearest-minute, just two more entries in `_SIMRAD_ACTIONS` (`nmea2000.py`) and `CANWriter`'s `cmd_byte` dict (`can_writer.py`). No new decoder or PGN needed.
+
+**Line-ping auth**: the bridge does not reuse `HELMLOG_TIMER_TOKEN` for pings — `/api/race-start/ping/{boat,pin}` are normal `require_auth("crew")` routes, not public/token-gated like `/api/internal/timer-event`. Instead the bridge authenticates as a headless device: provision a device API key at `/admin/devices` with role `crew` and scope covering `POST /api/race-start/ping/*`, then pass it as `--ping-token` to `simrad_timer_sk.py`. This is the existing device-bearer-token auth path (#423), already wired into the auth middleware ahead of `require_auth` — no route or auth code changes were needed to support it.

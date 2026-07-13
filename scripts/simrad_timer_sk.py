@@ -48,6 +48,14 @@ _ACTION_TO_POST: dict[str, tuple[str, object]] = {
     "nearest_minute": (SK_PATH_STATE, "nearest-minute"),
 }
 
+# ── Line-ping actions → existing manual ping endpoints ────────────────────────
+# Reuses the same /api/race-start/ping/{end} routes the crew UI calls, rather
+# than a separate internal endpoint — see docs/specs/simradtimerintegration.md.
+_PING_ACTION_TO_END: dict[str, str] = {
+    "boat_end_ping": "boat",
+    "pin_end_ping": "pin",
+}
+
 
 # ── HelmLog direct publisher ──────────────────────────────────────────────────
 
@@ -61,11 +69,17 @@ class HelmLogPublisher:
     context manager.
     """
 
-    def __init__(self, base_url: str, token: str = "") -> None:
-        self._url = base_url.rstrip("/") + "/api/internal/timer-event"
+    def __init__(self, base_url: str, token: str = "", ping_token: str = "") -> None:
+        self._base_url = base_url.rstrip("/")
+        self._url = self._base_url + "/api/internal/timer-event"
         self._headers: dict[str, str] = {}
         if token:
             self._headers["Authorization"] = f"Bearer {token}"
+        # Ping endpoints reuse the crew-auth ping routes, gated by a device
+        # API key (see /admin/devices) rather than HELMLOG_TIMER_TOKEN.
+        self._ping_headers: dict[str, str] = {}
+        if ping_token:
+            self._ping_headers["Authorization"] = f"Bearer {ping_token}"
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> HelmLogPublisher:
@@ -78,6 +92,10 @@ class HelmLogPublisher:
             self._client = None
 
     async def publish(self, record: SimradTimerRecord) -> None:
+        if record.action in _PING_ACTION_TO_END:
+            await self._post_ping(_PING_ACTION_TO_END[record.action])
+            return
+
         ts = (
             record.timestamp.strftime("%Y-%m-%dT%H:%M:%S.")
             + f"{record.timestamp.microsecond // 1000:03d}Z"
@@ -102,6 +120,18 @@ class HelmLogPublisher:
             log.debug("POST %s = %s  (%d ms)", path, value, r.elapsed.microseconds // 1000)
         except httpx.HTTPError as exc:
             log.warning("HelmLog POST failed  path=%s  error=%s", path, exc)
+
+    async def _post_ping(self, end: str) -> None:
+        """POST to the existing manual ping endpoint with no lat/lon, so the
+        server falls back to the latest GPS fix (storage.latest_position())."""
+        assert self._client is not None, "use as async context manager"
+        url = f"{self._base_url}/api/race-start/ping/{end}"
+        try:
+            r = await self._client.post(url, json={}, headers=self._ping_headers)
+            r.raise_for_status()
+            log.info("Line ping → %s end", end)
+        except httpx.HTTPError as exc:
+            log.warning("HelmLog ping POST failed  end=%s  error=%s", end, exc)
 
 
 # ── CAN reader ────────────────────────────────────────────────────────────────
@@ -173,6 +203,16 @@ def main() -> None:
         help="Bearer token matching HELMLOG_TIMER_TOKEN in HelmLog .env (optional)",
     )
     ap.add_argument(
+        "--ping-token",
+        default="",
+        nargs="?",
+        const="",
+        help=(
+            "Bearer token for a device API key (see /admin/devices) with crew role "
+            "and scope covering POST /api/race-start/ping/* (optional)"
+        ),
+    )
+    ap.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -186,7 +226,7 @@ def main() -> None:
     )
 
     async def amain() -> None:
-        async with HelmLogPublisher(args.helmlog, args.token) as pub:
+        async with HelmLogPublisher(args.helmlog, args.token, args.ping_token) as pub:
             await run(args.channel, pub)
 
     asyncio.run(amain())
