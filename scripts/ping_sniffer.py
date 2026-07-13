@@ -32,24 +32,25 @@ from typing import IO, NamedTuple
 import can
 
 sys.path.insert(0, "src")
-from helmlog.can_reader import extract_pgn
+from helmlog.can_reader import extract_pgn  # noqa: E402, I001
 
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
+
 class Frame(NamedTuple):
     ts: float
     pgn: int
     sa: int
-    da: int      # 0xFF = broadcast (PDU2); real DA for PDU1 unicast messages
+    da: int  # 0xFF = broadcast (PDU2); real DA for PDU1 unicast messages
     data: bytes  # raw 8 CAN bytes
 
 
 class Mark(NamedTuple):
     ts: float
-    label: str   # 'b' = boat end, 'p' = pin end
+    label: str  # 'b' = boat end, 'p' = pin end
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +58,27 @@ class Mark(NamedTuple):
 # ---------------------------------------------------------------------------
 
 # Single-frame proprietary PGNs (8-byte payload, no fast-packet header)
-_SINGLE_FRAME_RANGE = range(65280, 65536)       # 0xFF00–0xFFFF
+_SINGLE_FRAME_RANGE = range(65280, 65536)  # 0xFF00–0xFFFF
 
 # These standard PGNs use fast-packet format (non-exhaustive, covers what
 # we typically see on a B&G backbone)
 _KNOWN_FAST_PGNS = {
-    126996, 127506, 129029, 129038, 129039, 129040,
-    129284, 129285, 130074, 130306, 130310,
-    130820, 130821, 130824, 130850, 130845,
+    126996,
+    127506,
+    129029,
+    129038,
+    129039,
+    129040,
+    129284,
+    129285,
+    130074,
+    130306,
+    130310,
+    130820,
+    130821,
+    130824,
+    130850,
+    130845,
 }
 
 
@@ -83,8 +97,8 @@ class _FpBuf:
     def __init__(self) -> None:
         self._state: dict[tuple[int, int], dict[str, object]] = {}
         # list of (ts, payload) per (pgn, sa)
-        self.completed: dict[tuple[int, int], list[tuple[float, bytes]]] = (
-            collections.defaultdict(list)
+        self.completed: dict[tuple[int, int], list[tuple[float, bytes]]] = collections.defaultdict(
+            list
         )
 
     def feed(self, pgn: int, sa: int, data: bytes, ts: float) -> bytes | None:
@@ -97,8 +111,10 @@ class _FpBuf:
         if frame_byte == 0:
             total = data[1] if len(data) > 1 else 0
             self._state[key] = {
-                "seq": seq, "total": total,
-                "buf": bytearray(data[2:8]), "ts": ts,
+                "seq": seq,
+                "total": total,
+                "buf": bytearray(data[2:8]),
+                "ts": ts,
             }
             if total <= 6:
                 payload = bytes(self._state[key]["buf"])[:total]
@@ -121,6 +137,7 @@ class _FpBuf:
 # CAN reader thread
 # ---------------------------------------------------------------------------
 
+
 def _reader(
     channel: str,
     frames: list[Frame],
@@ -140,12 +157,12 @@ def _reader(
                 continue
             arb = msg.arbitration_id
             pgn = extract_pgn(arb)
-            sa  = arb & 0xFF
-            pf  = (arb >> 16) & 0xFF
+            sa = arb & 0xFF
+            pf = (arb >> 16) & 0xFF
             # PDU1 (PF < 240): PS field is destination address; PDU2: broadcast
-            da  = ((arb >> 8) & 0xFF) if pf < 240 else 0xFF
+            da = ((arb >> 8) & 0xFF) if pf < 240 else 0xFF
             raw = bytes(msg.data)
-            ts  = msg.timestamp or time.time()
+            ts = msg.timestamp or time.time()
             frames.append(Frame(ts, pgn, sa, da, raw))
             fp.feed(pgn, sa, raw, ts)
 
@@ -154,8 +171,8 @@ def _reader(
 # Summary helpers
 # ---------------------------------------------------------------------------
 
-INNER = 1.0   # ±s for per-frame detail
-OUTER = 3.0   # ±s for PGN summary
+INNER = 1.0  # ±s for per-frame detail
+OUTER = 3.0  # ±s for PGN summary
 
 
 def _hex(b: bytes) -> str:
@@ -167,7 +184,9 @@ def _rel(ts: float, mark_ts: float) -> str:
     return f"{d:+.3f}s"
 
 
-def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] = sys.stdout) -> None:
+def _summarise(
+    frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] = sys.stdout
+) -> None:
     def p(*args: object, **kwargs: object) -> None:
         print(*args, **kwargs, file=out)
 
@@ -179,9 +198,9 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] 
         label_name = "BOAT END" if mark.label == "b" else "PIN END"
         ts_str = datetime.fromtimestamp(mark.ts, tz=UTC).strftime("%H:%M:%S.%f")[:-3]
 
-        p(f"\n{'='*70}")
+        p(f"\n{'=' * 70}")
         p(f"  Mark: {label_name}  at {ts_str} UTC")
-        p(f"{'='*70}")
+        p(f"{'=' * 70}")
 
         # --- Inner window: per-frame detail with raw bytes ---
         inner = [f for f in frames if abs(f.ts - mark.ts) <= INNER]
@@ -192,8 +211,10 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] 
         if unicast:
             p("  *** UNICAST (addressed) messages — DA shown: ***")
             for f in unicast:
-                p(f"    {_rel(f.ts, mark.ts)}  PGN {f.pgn:6d} (0x{f.pgn:05X})  "
-                  f"SA=0x{f.sa:02X}→DA=0x{f.da:02X}  {_hex(f.data)}")
+                p(
+                    f"    {_rel(f.ts, mark.ts)}  PGN {f.pgn:6d} (0x{f.pgn:05X})  "
+                    f"SA=0x{f.sa:02X}→DA=0x{f.da:02X}  {_hex(f.data)}"
+                )
             p()
 
         if inner:
@@ -219,8 +240,7 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] 
             key = (pgn, sa)
             da_str = f"→DA=0x{da:02X}" if da != 0xFF else ""
             completions = [
-                (t, pt) for t, pt in fp.completed.get(key, [])
-                if abs(t - mark.ts) <= OUTER
+                (t, pt) for t, pt in fp.completed.get(key, []) if abs(t - mark.ts) <= OUTER
             ]
 
             # For single-frame PGNs, show unique raw payloads
@@ -230,7 +250,10 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] 
                     d = f.data
                     if d not in unique_raw:
                         unique_raw[d] = f.ts
-                p(f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}  ×{len(flist):3d}  [single-frame]")
+                p(
+                    f"  PGN {pgn:6d} (0x{pgn:05X})  SA=0x{sa:02X}{da_str}"
+                    f"  ×{len(flist):3d}  [single-frame]"
+                )
                 for raw_bytes, first_ts in unique_raw.items():
                     p(f"    {_rel(first_ts, mark.ts)}  {_hex(raw_bytes)}")
             else:
@@ -251,11 +274,15 @@ def _summarise(frames: list[Frame], marks: list[Mark], fp: _FpBuf, out: IO[str] 
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Broadband CAN sniffer for B&G line pings")
     ap.add_argument("--channel", default="can0")
-    ap.add_argument("--output", default="/tmp/sniffer_out.txt",
-                    help="Also write summary to this file (default: /tmp/sniffer_out.txt)")
+    ap.add_argument(
+        "--output",
+        default="/tmp/sniffer_out.txt",
+        help="Also write summary to this file (default: /tmp/sniffer_out.txt)",
+    )
     args = ap.parse_args()
 
     frames: list[Frame] = []
