@@ -313,17 +313,6 @@ def process_delta(
                     logger.warning("SK: bad position value {!r}: {}", value, exc)
                 continue
 
-            if path == "navigation.datetime" and on_gps_time is not None:
-                try:
-                    gps_str = str(value).replace("Z", "+00:00")
-                    gps_dt = datetime.fromisoformat(gps_str)
-                    if gps_dt.tzinfo is None:
-                        gps_dt = gps_dt.replace(tzinfo=UTC)
-                    on_gps_time(gps_dt)
-                except (ValueError, TypeError) as exc:
-                    logger.debug("SK: bad navigation.datetime {!r}: {}", value, exc)
-                continue
-
             if path == "navigation.attitude":
                 # Compound value {roll, pitch, yaw} in radians. Yaw is already
                 # covered by navigation.headingTrue; we only care about

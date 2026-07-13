@@ -50,9 +50,9 @@ class _ShmTime(ctypes.Structure):
     _fields_ = [
         ("mode", ctypes.c_int),
         ("count", ctypes.c_int),
-        ("clock_sec", ctypes.c_long),    # time_t — 8 bytes on 64-bit Linux
+        ("clock_sec", ctypes.c_long),  # time_t — 8 bytes on 64-bit Linux
         ("clock_usec", ctypes.c_int),
-        ("recv_sec", ctypes.c_long),     # time_t
+        ("recv_sec", ctypes.c_long),  # time_t
         ("recv_usec", ctypes.c_int),
         ("leap", ctypes.c_int),
         ("precision", ctypes.c_int),
@@ -108,8 +108,8 @@ class GpsTimeSyncer:
         recv_ns = round((recv_mono - recv_s) * 1_000_000_000)
 
         shm = self._shm
-        shm.valid = 0        # invalidate while updating
-        shm.count += 1       # odd count = write in progress
+        shm.valid = 0  # invalidate while updating
+        shm.count += 1  # odd count = write in progress
 
         shm.mode = 1
         shm.clock_sec = gps_s
@@ -121,7 +121,7 @@ class GpsTimeSyncer:
         shm.leap = 0
         shm.precision = -20  # ~1 µs
 
-        shm.count += 1       # even count = write complete
+        shm.count += 1  # even count = write complete
         shm.valid = 1
 
         self._updates += 1
