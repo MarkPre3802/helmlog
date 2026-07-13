@@ -825,11 +825,6 @@ async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
     print(f"duration_s:   {video.duration_s:.1f}s" if video.duration_s else "duration_s:   unknown")
     print(f"creation_utc: {video.creation_utc}  [{video.gps_source}]")
     print(f"gps_position: {video.gps_position}")
-    if video.gpmf_track:
-        first, last = video.gpmf_track[0], video.gpmf_track[-1]
-        span = (last.utc - first.utc).total_seconds()
-        print(f"gpmf_track:   {len(video.gpmf_track)} points, {span:.0f}s span"
-              f"  ({first.utc} → {last.utc})")
 
     if video.start_utc is None or video.end_utc is None:
         print("Video missing timestamps; cannot match to races.")
