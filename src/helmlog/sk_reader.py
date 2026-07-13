@@ -84,6 +84,7 @@ class SKReaderConfig:
     username: str | None = field(default_factory=lambda: os.environ.get("SK_USERNAME"))
     password: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD"))
     password_file: str | None = field(default_factory=lambda: os.environ.get("SK_PASSWORD_FILE"))
+    on_gps_time: Callable[[datetime], None] | None = None
 
 
 # ---------------------------------------------------------------------------
