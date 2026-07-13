@@ -5,11 +5,11 @@ into the chrony shared-memory refclock segment so chrony can discipline
 the system clock from the boat's GPS instead of internet NTP alone.
 
 Requires chrony configured with:
-    refclock SHM 0 refid GPS poll 3 precision 1e-1
+    refclock SHM 2 refid GPS poll 3 precision 1e-1
 
-The helmlog process needs read/write access to the SHM segment.  chrony
-creates the segment on startup and sets permissions for its own group;
-adding the helmlog user to the ``chrony`` group is sufficient.
+Uses SHM unit 2 (key 0x4E545032).  chrony creates units 0 and 1 with
+mode 0600 (root-only); units 2+ are created with mode 0666 so any user
+can attach without needing to be in the chrony group.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ class GpsTimeSyncer:
     pair so chrony detects torn writes.
     """
 
-    def __init__(self, unit: int = 0) -> None:
+    def __init__(self, unit: int = 2) -> None:
         key = _SHM_KEY_BASE + unit
         size = ctypes.sizeof(_ShmTime)
         shm_id = _libc.shmget(key, size, 0o666 | _IPC_CREAT)

@@ -11,18 +11,16 @@ systemctl disable --now systemd-timesyncd || true
 
 echo "==> Writing chrony GPS refclock config"
 cat > /etc/chrony/conf.d/helmlog-gps.conf << 'EOF'
-# GPS time from helmlog via SHM unit 0 (navigation.datetime from Signal K).
+# GPS time from helmlog via SHM unit 2 (navigation.datetime from Signal K).
+# Units 0-1 are 0600 (root-only); unit 2 is 0666 so helmlog can write it.
 # poll 3 = check every 8 s; precision 1e-1 = ~100 ms (NMEA-grade, no PPS).
 # trust: prefer GPS over internet NTP when GPS is healthy.
-refclock SHM 0 refid GPS poll 3 precision 1e-1 trust
+refclock SHM 2 refid GPS poll 3 precision 1e-1 trust
 
 # Allow large initial step when GPS first arrives (avoids slow slew from a
 # multi-day offset after the Pi reboots without network).
 makestep 1.0 -1
 EOF
-
-echo "==> Adding mark to chrony group (SHM access)"
-usermod -aG chrony mark
 
 echo "==> Restarting chrony"
 systemctl enable --now chrony
