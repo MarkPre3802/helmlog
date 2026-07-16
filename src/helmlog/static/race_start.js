@@ -26,6 +26,9 @@
   let snapshot = null;
   let editingDuration = false;
   let rollingResetInFlight = false;
+  // Sequence counter: incremented by every action() call so any concurrent
+  // refreshState() fetch can detect it is now stale and discard its result.
+  let _actionSeq = 0;
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -301,8 +304,12 @@
   // ---------------------------------------------------------------------------
 
   async function refreshState() {
+    const mySeq = _actionSeq;
     try {
       const r = await fetch("/api/race-start/state");
+      // Discard if an action fired while this fetch was in-flight — that
+      // action already updated snapshot with fresher data.
+      if (_actionSeq !== mySeq) return;
       const ct = r.headers.get("content-type") || "";
       if (!ct.includes("application/json")) {
         const text = await r.text();
@@ -316,7 +323,7 @@
       renderAll();
       showError("");
     } catch (e) {
-      showError("could not load state: " + e.message);
+      if (_actionSeq === mySeq) showError("could not load state: " + e.message);
     }
   }
 
@@ -341,6 +348,7 @@
   async function action(url, body) {
     if (!isWriter) return;
     showError("");
+    _actionSeq++;  // invalidate any in-flight refreshState fetch
     try {
       snapshot = await postJSON(url, body);
       renderAll();

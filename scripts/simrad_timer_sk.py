@@ -40,6 +40,11 @@ log = logging.getLogger(__name__)
 SK_PATH_STATE = "racing.startTimer.state"
 SK_PATH_DURATION = "racing.startTimer.duration"
 
+# Source address claimed by CANWriter in can_writer.py (_SA = 0x7E).
+# Frames we transmit echo back on the bus; ignoring them prevents a feedback
+# loop where our own boat/pin-end ping commands trigger _post_ping again.
+_OWN_SA = 0x7E
+
 # ── Action → SK path/value mapping ────────────────────────────────────────────
 _ACTION_TO_POST: dict[str, tuple[str, object]] = {
     "start": (SK_PATH_STATE, "running"),
@@ -166,6 +171,8 @@ async def run(channel: str, publisher: HelmLogPublisher) -> None:
                 continue
 
             sa = _source_addr(msg.arbitration_id)
+            if sa == _OWN_SA:
+                continue  # skip our own echoes — prevents boat/pin-end ping feedback loop
             payload = buf.feed(pgn, sa, bytes(msg.data))
             if payload is None:
                 continue
