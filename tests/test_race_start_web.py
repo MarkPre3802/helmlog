@@ -636,3 +636,52 @@ async def test_simrad_stopped_with_no_race_is_noop(storage: Storage) -> None:
             json={"path": "racing.startTimer.state", "value": "stopped", "ts": ts},
         )
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_stale_bg_stopped_does_not_close_new_race(storage: Storage) -> None:
+    """Stale B&G 'stopped' broadcast arriving after a second Start must not close the new race.
+
+    Sequence: Start → Stop → Reset → Start (second) → stale 'stopped' arrives.
+    The stale 'stopped' timestamp predates the second race, so end_race must
+    not be called.
+    """
+    app = create_app(storage)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        # First race: Start → Stop → Reset (same as user scenario).
+        r = await client.post("/api/race-start/start")
+        assert r.status_code == 200
+        race1_id = r.json()["race_id"]
+        assert race1_id is not None
+
+        r = await client.post("/api/race-start/stop")
+        assert r.status_code == 200
+        assert r.json()["race_id"] is None  # race1 ended
+
+        await client.post("/api/race-start/timer-reset")
+
+        # Snapshot the 'stopped' timestamp — this represents a stale B&G broadcast
+        # that is still in-flight on the CAN bus when the user clicks Start again.
+        stale_ts_dt = datetime.now(UTC) - timedelta(seconds=1)
+        stale_ts = stale_ts_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        # Second Start — creates a new race.
+        r = await client.post("/api/race-start/start")
+        assert r.status_code == 200
+        race2_id = r.json()["race_id"]
+        assert race2_id is not None
+        assert race2_id != race1_id
+
+        # Stale 'stopped' arrives from B&G (timestamp predates race2 start).
+        r = await client.post(
+            "/api/internal/timer-event",
+            json={"path": "racing.startTimer.state", "value": "stopped", "ts": stale_ts},
+        )
+        assert r.status_code == 200
+
+    # Race2 must still be open — the stale 'stopped' must not have ended it.
+    current = await storage.get_current_race()
+    assert current is not None
+    assert current.id == race2_id

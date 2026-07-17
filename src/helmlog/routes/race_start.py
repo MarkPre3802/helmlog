@@ -243,12 +243,15 @@ async def api_internal_timer_event(
             date_str = today.isoformat()
             session_type = "race"
             race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
-            race_name = nmea_ts.strftime("%Y-%m-%d %H:%M")
+            race_name = f"{nmea_ts.strftime('%Y-%m-%d %H:%M')} #{race_num}"
             await storage.start_race("", nmea_ts, date_str, race_num, race_name, session_type)
     elif body.value == "stopped":
         state = handle_stopped(state, nmea_ts=nmea_ts)
         current = await storage.get_current_race()
-        if current is not None:
+        # Guard: only close a race whose start predates this stopped event.
+        # B&G broadcasts its state periodically; a stale "stopped" arriving
+        # after api_start created a new race must not close that new race.
+        if current is not None and nmea_ts >= current.start_utc:
             await storage.end_race(current.id, nmea_ts)
     elif body.value == "reset":
         state = handle_reset(state, nmea_ts=nmea_ts)
@@ -387,7 +390,7 @@ async def api_start(
     date_str = today.isoformat()
     session_type = "race"
     race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
-    race_name = now.strftime("%Y-%m-%d %H:%M")
+    race_name = f"{now.strftime('%Y-%m-%d %H:%M')} #{race_num}"
     await storage.start_race("", now, date_str, race_num, race_name, session_type)
 
     t0_utc = now + timedelta(seconds=duration_s)
