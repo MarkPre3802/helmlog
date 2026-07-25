@@ -243,7 +243,7 @@ async def api_internal_timer_event(
             date_str = today.isoformat()
             session_type = "race"
             race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
-            race_name = nmea_ts.strftime("%Y-%m-%d %H:%M")
+            race_name = nmea_ts.strftime("%Y-%m-%d %H:%M:%S")
             await storage.start_race("", nmea_ts, date_str, race_num, race_name, session_type)
     elif body.value == "stopped":
         state = handle_stopped(state, nmea_ts=nmea_ts)
@@ -387,7 +387,7 @@ async def api_start(
     date_str = today.isoformat()
     session_type = "race"
     race_num = await storage.count_sessions_for_date(date_str, session_type) + 1
-    race_name = now.strftime("%Y-%m-%d %H:%M")
+    race_name = now.strftime("%Y-%m-%d %H:%M:%S")
     await storage.start_race("", now, date_str, race_num, race_name, session_type)
 
     t0_utc = now + timedelta(seconds=duration_s)
