@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -99,6 +101,91 @@ def _collect_tags(data: dict[str, Any]) -> dict[str, str]:
     return tags
 
 
+def _parse_gpsu_string(ts: str) -> datetime | None:
+    """Parse a GPMF GPSU timestamp (YYMMDDHHMMSS[.mmm]) to a UTC datetime."""
+    ts = ts.rstrip("\x00").strip()
+    if len(ts) < 12:
+        return None
+    try:
+        year = 2000 + int(ts[0:2])
+        month = int(ts[2:4])
+        day = int(ts[4:6])
+        hour = int(ts[6:8])
+        minute = int(ts[8:10])
+        second = int(ts[10:12])
+        microsecond = 0
+        if len(ts) > 13 and ts[12] == ".":
+            frac = ts[13:].ljust(6, "0")[:6]
+            microsecond = int(frac)
+        return datetime(year, month, day, hour, minute, second, microsecond, tzinfo=UTC)
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_gpsu(gpmf_data: bytes) -> datetime | None:
+    """Find the first GPSU element in raw GPMF bytes and return its UTC time."""
+    idx = gpmf_data.find(b"GPSU")
+    if idx < 0 or idx + 8 > len(gpmf_data):
+        return None
+    size = gpmf_data[idx + 5]
+    repeat = struct.unpack(">H", gpmf_data[idx + 6 : idx + 8])[0]
+    value_len = size * repeat
+    if idx + 8 + value_len > len(gpmf_data):
+        return None
+    try:
+        ts_str = gpmf_data[idx + 8 : idx + 8 + value_len].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return _parse_gpsu_string(ts_str)
+
+
+def _gpmf_stream_index(streams: list[dict[str, Any]]) -> int | None:
+    """Return the data-stream index of the GoPro MET (GPMF) stream, or None."""
+    data_idx = 0
+    for stream in streams:
+        if stream.get("codec_type") != "data":
+            continue
+        handler = (stream.get("tags") or {}).get("handler_name", "")
+        if "GoPro MET" in handler:
+            return data_idx
+        data_idx += 1
+    return None
+
+
+def _extract_gpmf_bytes(
+    path: Path, data_stream_idx: int, ffmpeg_cmd: str = "ffmpeg"
+) -> bytes | None:
+    """Extract the GPMF binary stream from a video file; returns None on failure."""
+    import contextlib
+
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        subprocess.run(
+            [
+                ffmpeg_cmd,
+                "-i",
+                str(path),
+                "-map",
+                f"0:d:{data_stream_idx}",
+                "-f",
+                "rawvideo",
+                tmp_path,
+                "-y",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        with open(tmp_path, "rb") as f:
+            return f.read()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
 class GoProProbeError(RuntimeError):
     pass
 
@@ -108,6 +195,7 @@ class GoProVideo:
     path: Path
     duration_s: float | None = None
     creation_utc: datetime | None = None
+    creation_source: str | None = None
     gps_position: tuple[float, float] | None = None
     gps_source: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
@@ -136,7 +224,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
                 "-print_format",
                 "json",
                 "-show_entries",
-                "format=duration:format_tags:stream_tags",
+                "format=duration,format_tags:stream=codec_type:stream_tags",
                 str(path),
             ],
             check=True,
@@ -157,6 +245,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
         raise GoProProbeError("ffprobe returned invalid JSON") from exc
 
     tags = _collect_tags(data)
+    streams = data.get("streams") or []
     duration_s = None
     fmt = data.get("format") or {}
     if isinstance(fmt, dict):
@@ -167,19 +256,35 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
             except (ValueError, TypeError):
                 duration_s = None
 
-    creation_time = tags.get("creation_time")
-    creation_utc = None
-    if creation_time is not None:
-        parsed = _ts(creation_time)
-        if parsed is None:
-            try:
-                naive = datetime.fromisoformat(creation_time)
-            except ValueError:
-                parsed = None
-            else:
-                tz = ZoneInfo(timezone)
-                parsed = naive.replace(tzinfo=tz).astimezone(UTC)
-        creation_utc = parsed
+    # Prefer GPS-disciplined UTC from the GPMF stream over the container clock,
+    # which is often uncorrected (wrong year, off by hours, etc.).
+    creation_utc: datetime | None = None
+    creation_source: str | None = None
+    ffmpeg_cmd = os.environ.get("HELMLOG_FFMPEG", "ffmpeg")
+    gpmf_idx = _gpmf_stream_index(streams)
+    if gpmf_idx is not None:
+        gpmf_data = _extract_gpmf_bytes(path, gpmf_idx, ffmpeg_cmd)
+        if gpmf_data is not None:
+            creation_utc = _parse_gpsu(gpmf_data)
+            if creation_utc is not None:
+                creation_source = "gpmf:GPSU"
+
+    if creation_utc is None:
+        creation_time = tags.get("creation_time")
+        if creation_time is not None:
+            parsed = _ts(creation_time)
+            if parsed is None:
+                try:
+                    naive = datetime.fromisoformat(creation_time)
+                except ValueError:
+                    parsed = None
+                else:
+                    tz = ZoneInfo(timezone)
+                    parsed = naive.replace(tzinfo=tz).astimezone(UTC)
+            creation_utc = parsed
+            if creation_utc is not None:
+                creation_source = "ffprobe:creation_time"
+
     gps_position = None
     gps_source = None
     for key in [
@@ -208,6 +313,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
         path=path,
         duration_s=duration_s,
         creation_utc=creation_utc,
+        creation_source=creation_source,
         gps_position=gps_position,
         gps_source=gps_source,
         tags=tags,
