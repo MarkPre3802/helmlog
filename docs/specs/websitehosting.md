@@ -34,10 +34,11 @@ Resolved through review discussion (2026-08-15):
    owning identity itself. The Pi stays fully authoritative and works
    offline with zero dependency on the web server — this is what resolves
    the "does the Pi still authenticate locally" risk that the combined-table
-   version had. Trade-off: a person with access to more than one boat needs
-   a separate login per boat (see open questions). Minor caveat: a password
-   changed on the Pi won't reach the web server until the next sync, so
-   there's a brief window where the web server's copy is stale.
+   version had. Accepted trade-off: a person with access to more than one
+   boat needs a separate login per boat — no cross-boat linking layer for
+   v1. Minor caveat: a password changed on the Pi won't reach the web
+   server until the next sync, so there's a brief window where the web
+   server's copy is stale.
 3a. **Boat selection is via URL, not a picker UI.** Each boat gets its own
    subdomain on the web server (mirroring the Pi's own tunnel subdomain
    pattern in `docs/https-deployment.md`, e.g. `<boat>.helmlog.org`) — the
@@ -66,14 +67,11 @@ Still to be resolved before this is spec-ready:
    on reaching the central server?~~ **Resolved by decision 3** (per-boat
    tables, synced as a replica) — the Pi stays fully authoritative and
    offline-capable.
-2. **How does one person get access to more than one boat?** Per-boat
-   tables (decision 3) mean a separate login per boat by default — a coach
-   reviewing several teams' boats, or a family member following two boats,
-   needs to log in separately to each one. Is that acceptable for v1, or
-   does it need a thin cross-boat linking layer later (without giving up
-   the per-boat-table foundation)? User creation itself is otherwise
-   unchanged from today — same per-boat `auth.py` invite flow, now also
-   usable via the web server once synced.
+2. ~~How does one person get access to more than one boat?~~ **Resolved by
+   decision 3**: separate login per boat, accepted as-is for v1 — no
+   cross-boat linking layer. User creation itself is otherwise unchanged
+   from today — same per-boat `auth.py` invite flow, now also usable via
+   the web server once synced.
 3. **Is the web server read-only for review, or can reviewers write
    anything?** Decision 5 (one-way sync) means anything written on the web
    server never reaches the Pi. Does "review race data" (goal 1) mean pure
