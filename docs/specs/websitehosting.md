@@ -65,6 +65,36 @@ Resolved through review discussion (2026-08-15):
    the Pi's own direct public exposure (Cloudflare Tunnel / Tailscale
    Funnel, per `docs/https-deployment.md`) — it's the primary point of
    public access.
+7. **Architecture: a thin multi-tenant layer wrapping the existing Pi
+   codebase, not a schema rewrite.** "Tables for each boat" means a
+   **separate SQLite file per boat** (byte-for-byte the same schema the Pi
+   already runs), not one shared table with a `boat_id` column — so
+   `storage.py`, `auth.py`, and every route in `routes/*.py` are reused
+   unchanged; they already assume one boat's DB per process via
+   `get_storage(request)`. Genuinely new pieces: (a) a subdomain-resolution
+   middleware backed by a small top-level boat registry (the *only*
+   actually-shared table on the server), (b) a storage pool —
+   `get_storage(request)` resolves to a lazily-opened, idle-evictable
+   `Storage` instance per boat instead of one baked into `app.state`, (c)
+   the sync-ingest endpoint (decision 8). Everything hardware- or
+   background-loop-related in `main.py` (`sk_reader.py`, `can_reader.py`,
+   `cameras.py`, `audio.py`, weather/tide/monitor/deploy loops) is dropped
+   entirely — none of it is meaningful on a review-only server, and this
+   lines up with the hardware-isolation boundary the codebase already has.
+8. **Sync mechanism: incremental row-push through the federation peer
+   protocol (option 2 of two considered).** The alternative — Litestream-
+   style byte-level WAL replication — was rejected: it's less code, but
+   replicates through an object-storage hop (a third infrastructure
+   component) rather than boat-to-server directly, and it's one-directional
+   at the byte level, so notes-write-back (decision 5) would need a
+   completely separate channel regardless. Option 2 reuses the Ed25519
+   signing/verification already in `peer_client.py`/`peer_api.py` — the new
+   work is a per-table watermark/cursor ("send everything newer than X"),
+   the ingest endpoint that applies incoming rows via `storage.py`'s own
+   write methods, an initial full-copy bootstrap for new boats, and
+   retry/resume handling — none of which exist yet, but all of it lives in
+   one place and carries notes-write-back through the same channel for
+   free, no new infrastructure.
 
 ## Open questions
 
@@ -83,12 +113,16 @@ Still to be resolved before this is spec-ready:
    anything?~~ **Resolved by decision 5**: reviewers can leave notes
    (write back to the Pi). Race cleanup/editing is dropped from scope for
    now (decision 5a) rather than resolved either way.
-4. What would the architecture look like end to end (data flow diagram),
-   now that decisions 1-6 narrow the shape?
-5. What would the sync behavior be in detail — trigger (on race end? on a
-   schedule? on demand?), payload (raw telemetry, exports, video, or some
-   subset), and failure/retry handling when the Pi's connection drops
-   mid-sync?
+4. ~~What would the architecture look like end to end?~~ **Resolved by
+   decision 7**: per-boat SQLite files behind a thin multi-tenant routing
+   layer, existing Pi codebase reused unchanged, hardware/background-loop
+   code dropped entirely.
+5. ~~What would the sync mechanism be?~~ **Resolved by decision 8**:
+   incremental row-push via the federation peer protocol. Still open at the
+   detail level: trigger (on race end? on a schedule? on demand?), exact
+   payload scope (raw telemetry, exports, video, or some subset — video
+   especially, given its size), and the specific retry/resume behavior
+   when the Pi's connection drops mid-sync.
 6. What specs would the web server itself need (compute/storage/bandwidth),
    especially given decision 4 (hosted video) as the likely cost driver?
 7. On a homelab starting point, how is the server made reachable from the
