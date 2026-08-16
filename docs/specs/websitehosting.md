@@ -126,6 +126,41 @@ Resolved through review discussion (2026-08-15):
    unreachable when sync is triggered, the Pi's UI surfaces a clear alert
    to retry once it's back online — no background queuing or automatic
    retry loop.
+13. **GPS-time video sync is hosting-independent — confirmed by reading the
+   existing code, not assumed.** `gopro.py`/`video.py` already matches a
+   camera recording to a race session and persists the result (`race_videos
+   .sync_utc`/`sync_offset_s`) entirely locally, before any upload —
+   keyed off the video file's embedded metadata cross-referenced against
+   HelmLog's own session records. Nothing downstream depends on the hosted
+   copy retaining metadata, so **the YouTube-vs-self-host choice (decision
+   4) has no bearing on GPS-sync capability either way.** Correction to
+   earlier discussion: today's matching is a **manual, two-step CLI flow**
+   (`gopro-match` suggests time-overlap candidates; a human supplies the
+   final `sync_utc`/`sync_offset_s` via a separate `link-video` command) —
+   not automated, and the GPS location tag it captures isn't currently used
+   in the matching logic, only printed for a human to eyeball. Small,
+   unrelated schema note surfaced along the way: `race_videos.youtube_url`
+   is `NOT NULL` — self-hosting needs that column (or a new one) to
+   accommodate a non-YouTube video reference.
+14. **Direction (pending validation): automate sync for GPS-equipped
+   cameras.** Some GoPros embed GPS-derived timestamps, some cameras don't.
+   When a video has an embedded GPS location tag (`GoProVideo.gps_position`
+   already captures this, no new probing needed), trust its `creation_time`
+   as GPS-disciplined — the same time reference as HelmLog's own
+   `storage.disciplined_now()` — and auto-link with `sync_offset_s = 0`
+   directly, skipping manual offset-guessing entirely. Non-GPS cameras keep
+   today's manual flow. Even in the GPS-trusted case, only auto-link when
+   exactly one session overlaps the video's time window — an ambiguous
+   match (e.g. two races the same day) still requires a human to confirm,
+   since auto-linking to the *wrong* race is worse than not auto-linking.
+   This is orthogonal to the hosting decision (it helps YouTube-hosted and
+   self-hosted video equally) but emerged from evaluating decision 4.
+   **Not yet trusted**: whether a GPS location tag being present reliably
+   means `creation_time` is *also* GPS-corrected hasn't been confirmed for
+   the actual cameras in use — a GPS-equipped camera could tag location
+   from a fix while still running its file-level `creation_time` off an
+   uncorrected internal clock. Needs validation against real footage before
+   this is implemented — see the validation branch this spawned.
 
 ## Open questions
 
@@ -160,3 +195,7 @@ Still to be resolved before this is spec-ready:
    outside (equivalent question to the Pi's own tunnel options in
    `docs/https-deployment.md`, but now for a multi-tenant central server —
    different risk profile than a single boat's own Tailscale Funnel)?
+8. Does GPS-location-tag presence reliably imply a GPS-disciplined
+   `creation_time`, for the actual cameras in use? Blocks whether decision
+   14 (automate sync for GPS-equipped cameras) is safe to implement as
+   described. Being validated on a separate branch against real footage.
