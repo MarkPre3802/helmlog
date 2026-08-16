@@ -48,12 +48,19 @@ Resolved through review discussion (2026-08-15):
 4. **Video is hosted on the web server for v1**, not deferred to
    YouTube-only. Likely the main cost driver behind goal 4's
    homelab-to-paid-cloud migration path.
-5. **Sync is one-way: Pi -> web server only.** Simplified from an earlier
-   two-way option specifically to avoid distributed write-conflict
-   resolution (crew tagging live on the boat vs. a reviewer editing later on
-   the web server). Nothing typed into the web server flows back to the
-   Pi's SQLite — see open question below on what that means for review
-   annotations.
+5. **Sync is one-way: Pi -> web server only**, with one narrow exception —
+   **reviewer notes write back to the Pi.** A note is additive (a new row,
+   not an edit to existing state), so two people leaving separate notes on
+   the same race never conflicts — it doesn't need general two-way sync,
+   just a small one-directional write-back channel for notes specifically.
+   Everything else stays one-way, avoiding the distributed write-conflict
+   resolution that ruled out full two-way sync in the first place.
+5a. **Race "clean up" (editing/trimming existing race data, e.g. the kind
+   of thing the manual trim feature does) is out of scope for now** —
+   dropped 2026-08-16 rather than resolving whether it needs to reach back
+   to the Pi. If a reviewer's cleanup action doesn't need to reach the Pi
+   at all, the web server's copy would simply diverge from the Pi's raw
+   original — revisit if/when this comes back into scope.
 6. **The web server is the public front door.** Not an addition alongside
    the Pi's own direct public exposure (Cloudflare Tunnel / Tailscale
    Funnel, per `docs/https-deployment.md`) — it's the primary point of
@@ -72,12 +79,10 @@ Still to be resolved before this is spec-ready:
    cross-boat linking layer. User creation itself is otherwise unchanged
    from today — same per-boat `auth.py` invite flow, now also usable via
    the web server once synced.
-3. **Is the web server read-only for review, or can reviewers write
-   anything?** Decision 5 (one-way sync) means anything written on the web
-   server never reaches the Pi. Does "review race data" (goal 1) mean pure
-   viewing, or can a reviewer add notes/tags/moments that live only on the
-   web server, separate from the boat's own record? Needs to be explicit
-   either way.
+3. ~~Is the web server read-only for review, or can reviewers write
+   anything?~~ **Resolved by decision 5**: reviewers can leave notes
+   (write back to the Pi). Race cleanup/editing is dropped from scope for
+   now (decision 5a) rather than resolved either way.
 4. What would the architecture look like end to end (data flow diagram),
    now that decisions 1-6 narrow the shape?
 5. What would the sync behavior be in detail — trigger (on race end? on a
