@@ -27,11 +27,23 @@ Resolved through review discussion (2026-08-15):
    see `docs/federation-design.md`). The web server is built as another peer
    in that same protocol rather than a separate sync mechanism — one
    identity/auth model, not two.
-3. **Auth: one combined user table on the web server**, not per-boat tables.
-   Needed so a user can log in once and see the boat(s) they have access to,
-   rather than a separate login per boat. This moves user identity off the
-   Pi and onto the central server (see open question below on what that
-   means for the Pi's own local/offline auth).
+3. **Auth: per-boat user tables, synced up like any other data** — not a
+   combined central table (superseded 2026-08-15; see below). Each boat's
+   existing `auth.py` user table rides along in the same one-way sync as
+   decision 2, so the web server holds a *replica* per boat rather than
+   owning identity itself. The Pi stays fully authoritative and works
+   offline with zero dependency on the web server — this is what resolves
+   the "does the Pi still authenticate locally" risk that the combined-table
+   version had. Trade-off: a person with access to more than one boat needs
+   a separate login per boat (see open questions). Minor caveat: a password
+   changed on the Pi won't reach the web server until the next sync, so
+   there's a brief window where the web server's copy is stale.
+3a. **Boat selection is via URL, not a picker UI.** Each boat gets its own
+   subdomain on the web server (mirroring the Pi's own tunnel subdomain
+   pattern in `docs/https-deployment.md`, e.g. `<boat>.helmlog.org`) — the
+   subdomain the user is on determines which boat's (synced) user table
+   they're authenticating against. Avoids exposing a directory of boats and
+   avoids building a boat-picker UI.
 4. **Video is hosted on the web server for v1**, not deferred to
    YouTube-only. Likely the main cost driver behind goal 4's
    homelab-to-paid-cloud migration path.
@@ -50,19 +62,18 @@ Resolved through review discussion (2026-08-15):
 
 Still to be resolved before this is spec-ready:
 
-1. **Does the Pi still authenticate anyone locally, or does all auth depend
-   on reaching the central server?** Today a boat can run fully
-   self-contained over Tailscale with no internet dependency for auth
-   (`AUTH_DISABLED=true`, or the Pi's own local user table). If identity
-   moves to the central web server (decision 3), does on-boat/offline
-   access still work without reaching it? Getting this wrong regresses the
-   "works with no connectivity" property the rest of the project is built
-   around.
-2. **How does a user get tied to a specific boat in the central table?**
-   One global user table needs an authorization model on top of it — an
-   invite from the boat owner (similar to today's co-op membership
-   invites), a self-signup code, or something else. This is "who can grant
-   access to this boat's data," not just "where are credentials stored."
+1. ~~Does the Pi still authenticate anyone locally, or does all auth depend
+   on reaching the central server?~~ **Resolved by decision 3** (per-boat
+   tables, synced as a replica) — the Pi stays fully authoritative and
+   offline-capable.
+2. **How does one person get access to more than one boat?** Per-boat
+   tables (decision 3) mean a separate login per boat by default — a coach
+   reviewing several teams' boats, or a family member following two boats,
+   needs to log in separately to each one. Is that acceptable for v1, or
+   does it need a thin cross-boat linking layer later (without giving up
+   the per-boat-table foundation)? User creation itself is otherwise
+   unchanged from today — same per-boat `auth.py` invite flow, now also
+   usable via the web server once synced.
 3. **Is the web server read-only for review, or can reviewers write
    anything?** Decision 5 (one-way sync) means anything written on the web
    server never reaches the Pi. Does "review race data" (goal 1) mean pure
