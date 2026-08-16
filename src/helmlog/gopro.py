@@ -174,22 +174,26 @@ def _parse_gpsu(payload: bytes) -> datetime | None:
     return None
 
 
-def _parse_gpmf_gps(data: bytes) -> list[GpmfPoint]:
+def _parse_gpmf_gps(data: bytes) -> tuple[list[GpmfPoint], datetime | None]:
     """Extract GPS points from raw GPMF bytes.
 
-    Returns points in chronological order with GPS-disciplined UTC timestamps.
-    Only includes points with a valid GPS fix.
+    Returns (points, first_gpsu) where first_gpsu is the first GPS-disciplined
+    UTC timestamp seen regardless of fix quality, and points only includes
+    samples with a valid GPS fix.
     """
     records = _gpmf_records(data)
 
     points: list[GpmfPoint] = []
     gpsu: datetime | None = None
+    first_gpsu: datetime | None = None
     scal: list[float] = [1.0]
     gps_fix = 0
 
     for key, type_char, payload in records:
         if key == "GPSU":
             gpsu = _parse_gpsu(payload)
+            if first_gpsu is None:
+                first_gpsu = gpsu
 
         elif key == "GPSF":
             if len(payload) >= 4 and type_char in ("L", "l"):
@@ -201,11 +205,11 @@ def _parse_gpmf_gps(data: bytes) -> list[GpmfPoint]:
             if type_char in ("s", "S"):
                 n = len(payload) // 2
                 fmt_char = "h" if type_char == "s" else "H"
-                scal = [float(v) for v in struct.unpack(f">{n}{fmt_char}", payload[:n * 2])]
+                scal = [float(v) for v in struct.unpack(f">{n}{fmt_char}", payload[: n * 2])]
             elif type_char in ("l", "L"):
                 n = len(payload) // 4
                 fmt_char = "i" if type_char == "l" else "I"
-                scal = [float(v) for v in struct.unpack(f">{n}{fmt_char}", payload[:n * 4])]
+                scal = [float(v) for v in struct.unpack(f">{n}{fmt_char}", payload[: n * 4])]
 
         elif key == "GPS5" and type_char == "l" and gpsu is not None and gps_fix > 0:
             # GPS5: lat lon alt speed2D speed3D — each int32, scale by SCAL
@@ -231,7 +235,7 @@ def _parse_gpmf_gps(data: bytes) -> list[GpmfPoint]:
                     continue
                 points.append(GpmfPoint(utc=gpsu, lat=lat, lon=lon, speed_mps=speed_mps))
 
-    return points
+    return points, first_gpsu
 
 
 def _find_gpmd_stream(path: Path, ffprobe_cmd: str) -> int | None:
@@ -260,16 +264,18 @@ def _find_gpmd_stream(path: Path, ffprobe_cmd: str) -> int | None:
 
 def extract_gpmf_track(
     path: Path, ffprobe_cmd: str = "ffprobe", ffmpeg_cmd: str = "ffmpeg"
-) -> list[GpmfPoint]:
-    """Extract GPS points from a GoPro MP4's GPMF telemetry track.
+) -> tuple[list[GpmfPoint], datetime | None]:
+    """Extract GPS points and first GPSU from a GoPro MP4's GPMF telemetry track.
 
-    Returns an empty list if the file has no gpmd stream or no GPS fix.
+    Returns (points, first_gpsu). Points is empty when there is no gpmd stream
+    or no GPS fix. first_gpsu is the first GPS-disciplined UTC timestamp seen,
+    regardless of fix quality — valid even when points is empty.
     Raises GoProProbeError on hard failures (ffmpeg not found, extraction error).
     """
     stream_idx = _find_gpmd_stream(path, ffprobe_cmd)
     if stream_idx is None:
         logger.debug("No gpmd stream found in {}", path.name)
-        return []
+        return [], None
 
     # Extract the raw GPMF binary via ffmpeg
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
@@ -307,9 +313,9 @@ def extract_gpmf_track(
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    points = _parse_gpmf_gps(raw)
+    points, first_gpsu = _parse_gpmf_gps(raw)
     logger.debug("GPMF: {} GPS points extracted from {}", len(points), path.name)
-    return points
+    return points, first_gpsu
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +332,7 @@ class GoProVideo:
     path: Path
     duration_s: float | None = None
     creation_utc: datetime | None = None
+    creation_source: str | None = None
     gps_position: tuple[float, float] | None = None
     tags: dict[str, str] = field(default_factory=dict)
     gpmf_track: tuple[GpmfPoint, ...] = field(default_factory=tuple)
@@ -342,7 +349,7 @@ class GoProVideo:
 
     @property
     def gps_source(self) -> str:
-        """Human-readable label for the timestamp source."""
+        """Human-readable label for the position source."""
         return "gpmf" if self.gpmf_track else "tag"
 
 
@@ -423,29 +430,40 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
 
     # --- GPMF GPS track (preferred source) ---
     gpmf_track: tuple[GpmfPoint, ...] = ()
+    gpmf_gpsu: datetime | None = None
     try:
-        points = extract_gpmf_track(path, ffprobe_cmd, ffmpeg_cmd)
+        points, gpmf_gpsu = extract_gpmf_track(path, ffprobe_cmd, ffmpeg_cmd)
         gpmf_track = tuple(points)
     except GoProProbeError as exc:
         logger.debug("GPMF extraction skipped: {}", exc)
 
-    # Resolve final creation_utc and gps_position: prefer GPMF over tags
+    # Resolve final creation_utc and gps_position.
+    # Priority: GPMF GPS track (fix + position) > GPMF GPSU (time only, no fix) > tag
     creation_utc: datetime | None
+    creation_source: str | None
     gps_position: tuple[float, float] | None
     if gpmf_track:
         creation_utc = gpmf_track[0].utc
+        creation_source = "gpmf:GPS5"
         gps_position = (gpmf_track[0].lat, gpmf_track[0].lon)
+        logger.debug("Using GPMF GPS timestamp: {} (tag was {})", creation_utc, tag_creation_utc)
+    elif gpmf_gpsu is not None:
+        creation_utc = gpmf_gpsu
+        creation_source = "gpmf:GPSU"
+        gps_position = tag_gps_position
         logger.debug(
-            "Using GPMF GPS timestamp: {} (tag was {})", creation_utc, tag_creation_utc
+            "Using GPMF GPSU (no position fix): {} (tag was {})", creation_utc, tag_creation_utc
         )
     else:
         creation_utc = tag_creation_utc
+        creation_source = "ffprobe:creation_time" if tag_creation_utc is not None else None
         gps_position = tag_gps_position
 
     return GoProVideo(
         path=path,
         duration_s=duration_s,
         creation_utc=creation_utc,
+        creation_source=creation_source,
         gps_position=gps_position,
         tags=tags,
         gpmf_track=gpmf_track,

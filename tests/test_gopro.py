@@ -414,29 +414,37 @@ def test_parse_gpsu_invalid() -> None:
 
 def test_parse_gpmf_gps_basic() -> None:
     gpmf = _build_gpmf_gps_stream()
-    points = _parse_gpmf_gps(gpmf)
+    points, first_gpsu = _parse_gpmf_gps(gpmf)
     assert len(points) == 1
     p = points[0]
     assert abs(p.lat - 47.6) < 1e-4
     assert abs(p.lon - -122.33) < 1e-4
     assert p.utc.year == 2020
     assert p.utc.tzinfo is UTC
+    assert first_gpsu is not None
+    assert first_gpsu.year == 2020
 
 
 def test_parse_gpmf_gps_no_fix() -> None:
     gpmf = _build_gpmf_gps_stream(gps_fix=0)
-    points = _parse_gpmf_gps(gpmf)
+    points, first_gpsu = _parse_gpmf_gps(gpmf)
     assert points == []
+    # GPSU is still present even with no fix
+    assert first_gpsu is not None
+    assert first_gpsu.year == 2020
 
 
 def test_parse_gpmf_gps_zero_coords_skipped() -> None:
     gpmf = _build_gpmf_gps_stream(lat_raw=0, lon_raw=0)
-    points = _parse_gpmf_gps(gpmf)
+    points, first_gpsu = _parse_gpmf_gps(gpmf)
     assert points == []
+    assert first_gpsu is not None
 
 
 def test_parse_gpmf_gps_empty_bytes() -> None:
-    assert _parse_gpmf_gps(b"") == []
+    points, first_gpsu = _parse_gpmf_gps(b"")
+    assert points == []
+    assert first_gpsu is None
 
 
 def test_probe_video_uses_gpmf_timestamp(tmp_path: Path) -> None:
@@ -478,8 +486,49 @@ def test_probe_video_uses_gpmf_timestamp(tmp_path: Path) -> None:
         video = probe_video(mp4)
 
     assert video.gps_source == "gpmf"
+    assert video.creation_source == "gpmf:GPS5"
     assert video.creation_utc is not None
     assert video.creation_utc.year == 2024
     assert video.creation_utc.month == 6
     assert len(video.gpmf_track) == 1
     assert abs(video.gpmf_track[0].lat - 47.6) < 1e-4
+
+
+def test_probe_video_uses_gpsu_when_no_fix(tmp_path: Path) -> None:
+    """When GPMF has GPSU but GPS fix=0 throughout, use GPSU over wrong container tag."""
+    mp4 = tmp_path / "test.mp4"
+    mp4.write_bytes(b"\x00")
+
+    bad_tag_json = json.dumps(
+        {
+            "format": {
+                "duration": "963.963",
+                "tags": {"creation_time": "2016-05-19T02:46:57.000000Z"},
+            },
+            "streams": [],
+        }
+    )
+    stream_detect = _mock_run(
+        stderr="Stream #0:3[0x4](eng): Data: bin_data (gpmd / 0x646D7067), 35 kb/s"
+    )
+    # GPMF with GPSU but fix=0 — same as our Hero 6 test video
+    gpmf_bytes = _build_gpmf_gps_stream(gpsu_str="260808225720", gps_fix=0)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "json" in cmd_str:
+            return _mock_run(stdout=bad_tag_json)
+        if "ffmpeg" in cmd_str:
+            Path(str(cmd[-1])).write_bytes(gpmf_bytes)
+            return _mock_run()
+        return stream_detect
+
+    with patch("subprocess.run", side_effect=fake_run):
+        video = probe_video(mp4)
+
+    assert video.creation_source == "gpmf:GPSU"
+    assert video.creation_utc is not None
+    assert video.creation_utc.year == 2026
+    assert video.creation_utc.month == 8
+    assert video.creation_utc.day == 8
+    assert len(video.gpmf_track) == 0  # no position fix
