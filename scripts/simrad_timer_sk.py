@@ -68,7 +68,7 @@ class HelmLogPublisher:
             self._headers["Authorization"] = f"Bearer {token}"
         self._client: httpx.AsyncClient | None = None
 
-    async def __aenter__(self) -> "HelmLogPublisher":
+    async def __aenter__(self) -> HelmLogPublisher:
         self._client = httpx.AsyncClient(timeout=2.0)
         return self
 

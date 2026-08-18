@@ -13,11 +13,11 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from loguru import logger
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _ts(value: str | None) -> datetime | None:
@@ -129,7 +129,8 @@ def _parse_location_string(value: str) -> tuple[float, float] | None:
     value = value.strip()
 
     # ISO6709-style: +47.123456-122.123456/ or -47.123456+122.123456/
-    m = re.match(r"^(?P<lat>[+-]?\d+(?:\.\d+)?)(?P<lon>[+-]?\d+(?:\.\d+)?)(?:[+-]\d+(?:\.\d+)?/?)?$", value)
+    pattern = r"^(?P<lat>[+-]?\d+(?:\.\d+)?)(?P<lon>[+-]?\d+(?:\.\d+)?)(?:[+-]\d+(?:\.\d+)?/?)?$"
+    m = re.match(pattern, value)
     if m:
         try:
             lat = float(m.group("lat"))
@@ -192,6 +193,7 @@ class GoProVideo:
     creation_utc: datetime | None = None
     gps_time_utc: datetime | None = None
     gps_position: tuple[float, float] | None = None
+    gps_source: str | None = None
     tags: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -258,6 +260,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
         creation_utc = parsed
 
     gps_position = None
+    gps_source = None
     for key in [
         "com.apple.quicktime.location.ISO6709",
         "location",
@@ -271,10 +274,12 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
             continue
         gps_position = _parse_location_string(tags[key])
         if gps_position is not None:
+            gps_source = f"ffprobe:{key}"
             break
     if gps_position is None and "GPSLatitude" in tags and "GPSLongitude" in tags:
         try:
             gps_position = (float(tags["GPSLatitude"]), float(tags["GPSLongitude"]))
+            gps_source = "ffprobe:GPSLatitude+GPSLongitude"
         except ValueError:
             gps_position = None
 
@@ -290,6 +295,7 @@ def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:
         creation_utc=creation_utc,
         gps_time_utc=gps_time_utc,
         gps_position=gps_position,
+        gps_source=gps_source,
         tags=tags,
     )
 

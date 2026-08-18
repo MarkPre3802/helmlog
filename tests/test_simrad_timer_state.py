@@ -118,9 +118,7 @@ def test_handle_running_no_duration_raises() -> None:
 
 def test_handle_stopped_computes_remaining() -> None:
     t0 = _ts(300)  # gun is 5 min from base
-    state = SimradTimerState(
-        duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True
-    )
+    state = SimradTimerState(duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True)
     stop_ts = _ts(120)  # stopped 2 min in, 3 min remaining
     result = handle_stopped(state, nmea_ts=stop_ts)
     assert result.is_running is False
@@ -129,9 +127,7 @@ def test_handle_stopped_computes_remaining() -> None:
 
 def test_handle_stopped_clamps_to_zero_if_past_gun() -> None:
     t0 = _ts(100)
-    state = SimradTimerState(
-        duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True
-    )
+    state = SimradTimerState(duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True)
     result = handle_stopped(state, nmea_ts=_ts(150))  # 50s past gun
     assert result.stopped_remaining_s == 0.0
 
@@ -149,9 +145,7 @@ def test_handle_stopped_turns_instrument_timer_on() -> None:
 
 def test_handle_reset_while_running_resets_t0_to_full_duration() -> None:
     t0 = _ts(150)
-    state = SimradTimerState(
-        duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True
-    )
+    state = SimradTimerState(duration_s=300, t0_utc=t0, is_running=True, instrument_timer_on=True)
     reset_ts = _ts(100)
     result = handle_reset(state, nmea_ts=reset_ts)
     assert result.t0_utc == reset_ts + timedelta(seconds=300)
