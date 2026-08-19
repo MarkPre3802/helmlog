@@ -134,6 +134,21 @@ def _reconcile_end_utc(proposed: datetime, last_data: datetime | None, grace_s: 
     return proposed
 
 
+@dataclass(frozen=True)
+class TrimPreview:
+    """Preview of a manual "trim non-race data" action for one race (#11).
+
+    ``detected=False`` means the #812 finish heuristic found no plausible
+    cutoff (e.g. a distance race that never returns near the start) — the
+    caller should fall back to a manual time picker rather than this preview.
+    """
+
+    detected: bool
+    cutoff_utc: datetime | None
+    duration_removed_s: float | None
+    rows_by_table: dict[str, int]
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -2626,10 +2641,11 @@ class Storage:
 
         db_path = self._config.db_path
         is_new = not os.path.exists(db_path)
-        self._db = await aiosqlite.connect(db_path)
+        self._db = await aiosqlite.connect(db_path, timeout=30)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.execute("PRAGMA journal_mode = WAL")
+        await self._db.execute("PRAGMA busy_timeout = 30000")
         if is_new and os.path.exists(db_path):
             # Python sqlite3 creates files with 0644 regardless of umask.
             # Add group-write so both the helmlog service account and the
@@ -3103,8 +3119,8 @@ class Storage:
             )
             if cur.rowcount > 0:
                 added += 1
+        await db.commit()
         if added:
-            await db.commit()
             logger.info("Synced {} new ParameterDef(s) into controls table", added)
 
     async def _migrate_v56_categories(self) -> None:
@@ -4201,6 +4217,72 @@ class Storage:
         if first is None or last is None:
             return None
         return first, last
+
+    async def preview_race_trim(self, race_id: int, now: datetime) -> TrimPreview:
+        """Suggest a cutoff for trimming non-race data from a race (#11), by
+        reusing the #812 finish-detection heuristic. Never mutates anything —
+        callers must confirm via ``trim_race`` before any data changes."""
+        from helmlog.polar import detect_finish
+
+        race = await self.get_race(race_id)
+        not_detected = TrimPreview(
+            detected=False, cutoff_utc=None, duration_removed_s=None, rows_by_table={}
+        )
+        if race is None:
+            return not_detected
+        window_end = race.end_utc or now
+        candidate_ts, source = await detect_finish(self, race.start_utc, window_end)
+        if source != "heuristic":
+            return not_detected
+        rows_by_table: dict[str, int] = {}
+        db = self._read_conn()
+        for table in self._TELEMETRY_TABLES:
+            cur = await db.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE race_id = ? AND ts > ?",  # noqa: S608
+                (race_id, candidate_ts.isoformat()),
+            )
+            row = await cur.fetchone()
+            rows_by_table[table] = int(row["n"]) if row else 0
+        return TrimPreview(
+            detected=True,
+            cutoff_utc=candidate_ts,
+            duration_removed_s=(window_end - candidate_ts).total_seconds(),
+            rows_by_table=rows_by_table,
+        )
+
+    async def trim_race(self, race_id: int, cutoff_utc: datetime) -> int:
+        """Apply a confirmed trim (#11): move the race's end back to
+        ``cutoff_utc`` (closing it if still open) and detach — ``race_id =
+        NULL``, never deleted — telemetry after the cutoff. Returns the number
+        of rows detached, or 0 if there was nothing to trim."""
+        race = await self.get_race(race_id)
+        if race is None:
+            return 0
+        db = self._conn()
+        if race.end_utc is None:
+            await self.end_race(race_id, cutoff_utc)
+        elif cutoff_utc < race.end_utc:
+            await db.execute(
+                "UPDATE races SET end_utc = ? WHERE id = ?",
+                (cutoff_utc.isoformat(), race_id),
+            )
+            await db.commit()
+            await self._invalidate_race_cache(race_id)
+        else:
+            return 0
+
+        total = 0
+        for table in self._TELEMETRY_TABLES:
+            cur = await db.execute(
+                f"UPDATE {table} SET race_id = NULL WHERE race_id = ? AND ts > ?",  # noqa: S608
+                (race_id, cutoff_utc.isoformat()),
+            )
+            total += cur.rowcount or 0
+        await db.commit()
+        logger.info(
+            "Race {} trimmed at {}: {} rows detached", race_id, cutoff_utc.isoformat(), total
+        )
+        return total
 
     async def _flag_boundary_clock_skew(self, race_id: int, end_utc: datetime) -> None:
         """Flag a race whose start/end boundaries disagree with its own telemetry.
