@@ -805,9 +805,7 @@ async def _link_video(url: str, sync_utc_iso: str, sync_offset_s: float) -> None
 # ---------------------------------------------------------------------------
 
 
-async def _gopro_match(
-    path: str, timezone: str, db_path: str | None, debug: bool = False
-) -> None:
+async def _gopro_match(path: str, timezone: str, db_path: str | None, debug: bool = False) -> None:
     """Probe a local GoPro/MP4 file and print candidate races to match."""
     from helmlog.gopro import GoProProbeError, match_sessions_to_video, probe_video
     from helmlog.storage import Storage, StorageConfig
@@ -825,9 +823,9 @@ async def _gopro_match(
 
     print(f"path:         {video.path}")
     print(f"duration_s:   {video.duration_s:.1f}s" if video.duration_s else "duration_s:   unknown")
-    print(f"creation_utc: {video.creation_utc}  [{video.gps_source}]")
+    print(f"creation_utc: {video.creation_utc}  [{video.creation_source}]")
     print(f"gps_time_utc: {video.gps_time_utc}")
-    print(f"gps_position: {video.gps_position}")
+    print(f"gps_position: {video.gps_position}  [{video.gps_source}]")
     if debug:
         print("tags:")
         for key in sorted(video.tags):

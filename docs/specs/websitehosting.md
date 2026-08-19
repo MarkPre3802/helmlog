@@ -161,6 +161,26 @@ Resolved through review discussion (2026-08-15):
    from a fix while still running its file-level `creation_time` off an
    uncorrected internal clock. Needs validation against real footage before
    this is implemented — see the validation branch this spawned.
+15. **GoPro ingest is Pi-side via USB card dongle — no Mac watcher, unlike
+   Insta360.** User pulls the card and plugs it into the Pi directly. A
+   Pi-side watcher (same shape as Insta360's `watch-exports.sh`, but running
+   on the Pi instead of the Mac) detects new files on the mounted card and
+   runs the lightweight probe from decision 14 (GPSU extraction, session
+   matching) immediately — that step is metadata-only, no transcoding, so
+   it's cheap enough to run on Pi hardware directly. The probed video (plus
+   its `creation_utc`/`creation_source`/matched-session metadata) then goes
+   to the web server over **decision 9's existing video/audio transfer
+   pipe** — this is not a new sync mechanism, just another producer onto
+   that pipe. Any heavier processing (transcoding, future compute-heavy
+   work) happens **server-side**, where compute/GPU is available, following
+   the same offload shape already established for Whisper transcription
+   (`docs/transcription-offload.md`: Pi hands heavy work to a more capable
+   machine over the network) — except the offload target is now the web
+   server instead of a Mac worker. Publishing — self-hosted (decision 4)
+   and/or republished to YouTube or another streaming service — also
+   happens from the web server, not the Pi. End-to-end user experience:
+   plug in the card, wait, then see video + data together on the website,
+   auto-synced by GPS time with no manual step.
 
 ## Open questions
 
@@ -195,7 +215,11 @@ Still to be resolved before this is spec-ready:
    outside (equivalent question to the Pi's own tunnel options in
    `docs/https-deployment.md`, but now for a multi-tenant central server —
    different risk profile than a single boat's own Tailscale Funnel)?
-8. Does GPS-location-tag presence reliably imply a GPS-disciplined
-   `creation_time`, for the actual cameras in use? Blocks whether decision
-   14 (automate sync for GPS-equipped cameras) is safe to implement as
-   described. Being validated on a separate branch against real footage.
+8. ~~Does GPS-location-tag presence reliably imply a GPS-disciplined
+   `creation_time`, for the actual cameras in use?~~ **Resolved by the
+   validation spike**: no — container `creation_time` was found off by 10
+   years on a Hero 6. The GPMF stream's `GPSU` field is GPS-disciplined and
+   safe to trust; `probe_video()` (`gopro.py`) now extracts it in
+   preference to `creation_time`, tagging the source via `creation_source`
+   (`"gpmf:GPSU"` vs `"ffprobe:creation_time"`) so decision 14's auto-link
+   gate can check it directly.

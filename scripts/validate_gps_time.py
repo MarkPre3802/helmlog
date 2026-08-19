@@ -43,6 +43,7 @@ import json
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -71,7 +72,7 @@ def dump_all_tags(path: Path) -> None:
     print(json.dumps(data, indent=2))
 
 
-async def cross_check_against_telemetry(creation_utc, db_path: str) -> None:
+async def cross_check_against_telemetry(creation_utc: datetime, db_path: str) -> None:
     from datetime import timedelta
 
     from helmlog.storage import Storage, StorageConfig
@@ -85,12 +86,12 @@ async def cross_check_against_telemetry(creation_utc, db_path: str) -> None:
         print(f"\n=== Telemetry near creation_utc ({creation_utc.isoformat()}) ===")
         print(f"positions in +/-10min window: {len(positions)}")
         if positions:
-            closest = min(
-                positions,
-                key=lambda p: abs(
-                    (creation_utc - __import__("datetime").datetime.fromisoformat(p["ts"]).replace(tzinfo=creation_utc.tzinfo)).total_seconds()
-                ),
-            )
+
+            def _delta_s(p: dict[str, str]) -> float:
+                ts = datetime.fromisoformat(p["ts"]).replace(tzinfo=creation_utc.tzinfo)
+                return abs((creation_utc - ts).total_seconds())
+
+            closest = min(positions, key=_delta_s)
             print(f"closest recorded position ts: {closest['ts']}")
     finally:
         await storage.close()
@@ -99,7 +100,9 @@ async def cross_check_against_telemetry(creation_utc, db_path: str) -> None:
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("video_path")
-    parser.add_argument("--db", default=None, help="Path to a HelmLog SQLite DB to cross-check against")
+    parser.add_argument(
+        "--db", default=None, help="Path to a HelmLog SQLite DB to cross-check against"
+    )
     parser.add_argument("--timezone", default="UTC")
     args = parser.parse_args()
 
