@@ -278,7 +278,7 @@ def test_probe_video_basic(tmp_path: Path) -> None:
     # Call 1: ffprobe JSON metadata; Call 2: ffprobe stream detect (no gpmd)
     with patch("subprocess.run", side_effect=[_mock_run(), _NO_GPMD]):
         video = probe_video(mp4)
-    assert video.gps_source == "tag"
+    assert video.creation_source == "ffprobe:creation_time"
     assert video.duration_s == pytest.approx(3600.0)
     assert video.creation_utc == datetime(2024, 6, 1, 10, 0, tzinfo=UTC)
     assert video.gps_position is not None
@@ -485,7 +485,6 @@ def test_probe_video_uses_gpmf_timestamp(tmp_path: Path) -> None:
     with patch("subprocess.run", side_effect=fake_run):
         video = probe_video(mp4)
 
-    assert video.gps_source == "gpmf"
     assert video.creation_source == "gpmf:GPS5"
     assert video.creation_utc is not None
     assert video.creation_utc.year == 2024

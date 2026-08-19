@@ -17,6 +17,7 @@ import signal
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -805,7 +806,13 @@ async def _link_video(url: str, sync_utc_iso: str, sync_offset_s: float) -> None
 # ---------------------------------------------------------------------------
 
 
-async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
+async def _gopro_match(
+    path: str,
+    timezone: str,
+    db_path: str | None,
+    commit: bool = False,
+    race_id_override: int | None = None,
+) -> None:
     """Probe a local GoPro/MP4 file and print candidate races to match."""
     from helmlog.gopro import GoProProbeError, match_sessions_to_video, probe_video
     from helmlog.storage import Storage, StorageConfig
@@ -823,7 +830,7 @@ async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
 
     print(f"path:         {video.path}")
     print(f"duration_s:   {video.duration_s:.1f}s" if video.duration_s else "duration_s:   unknown")
-    print(f"creation_utc: {video.creation_utc}  [{video.gps_source}]")
+    print(f"creation_utc: {video.creation_utc}  [{video.creation_source or 'unknown'}]")
     print(f"gps_position: {video.gps_position}")
     if video.gpmf_track:
         first, last = video.gpmf_track[0], video.gpmf_track[-1]
@@ -841,29 +848,74 @@ async def _gopro_match(path: str, timezone: str, db_path: str | None) -> None:
     storage = Storage(cfg)
     await storage.connect()
     try:
-        start = video.start_utc - timedelta(hours=1)
-        end = video.end_utc + timedelta(hours=1)
-        races = await storage.list_races_in_range(start, end)
-        sessions = [
-            {"id": r.id, "name": r.name, "start_utc": r.start_utc, "end_utc": r.end_utc}
-            for r in races
-        ]
-        candidates = match_sessions_to_video(video, sessions, min_overlap_s=5)
+        if race_id_override is not None:
+            race = await storage.get_race(race_id_override)
+            if race is None:
+                logger.error("Race {} not found", race_id_override)
+                sys.exit(1)
+            candidates: list[dict[str, Any]] = [
+                {
+                    "session": {
+                        "id": race.id,
+                        "name": race.name,
+                        "start_utc": race.start_utc,
+                        "end_utc": race.end_utc,
+                    },
+                    "overlap_s": 0.0,
+                    "video_fraction": 0.0,
+                }
+            ]
+        else:
+            start = video.start_utc - timedelta(hours=1)
+            end = video.end_utc + timedelta(hours=1)
+            races = await storage.list_races_in_range(start, end)
+            sessions = [
+                {"id": r.id, "name": r.name, "start_utc": r.start_utc, "end_utc": r.end_utc}
+                for r in races
+            ]
+            candidates = match_sessions_to_video(video, sessions, min_overlap_s=5)
+
+        if not candidates:
+            print("No matching races found.")
+            return
+
+        print("\nCandidate matches:")
+        for c in candidates:
+            s = c["session"]
+            print(
+                f"  id={s['id']} name={s.get('name')!r}"
+                f" start={s['start_utc']} overlap_s={c['overlap_s']:.1f}"
+                f" frac={c['video_fraction']:.2f}"
+            )
+
+        if not commit:
+            return
+
+        best = candidates[0]["session"]
+        sync_utc = video.creation_utc
+        if sync_utc is None:
+            logger.error("No timestamp available; cannot commit sync.")
+            sys.exit(1)
+
+        row_id = await storage.add_race_video(
+            race_id=int(best["id"]),
+            youtube_url="",
+            video_id=p.name,
+            title=p.stem,
+            label="",
+            sync_utc=sync_utc,
+            sync_offset_s=0.0,
+            duration_s=video.duration_s,
+        )
+        print(
+            f"\nCommitted: race_videos row id={row_id}"
+            f"  race={best['id']} ({best.get('name')!r})"
+            f"  sync_utc={sync_utc.isoformat()}"
+            f"  [{video.creation_source or 'unknown'}]"
+        )
+        print("After YouTube upload, update this row's URL in the web UI.")
     finally:
         await storage.close()
-
-    if not candidates:
-        print("No matching races found.")
-        return
-
-    print("\nCandidate matches:")
-    for c in candidates:
-        s = c["session"]
-        print(
-            f"  id={s['id']} name={s.get('name')!r}"
-            f" start={s['start_utc']} overlap_s={c['overlap_s']:.1f}"
-            f" frac={c['video_fraction']:.2f}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1936,6 +1988,18 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="DB",
         help="Path to HelmLog SQLite database (overrides DB_PATH env / default)",
     )
+    gp.add_argument(
+        "--commit",
+        action="store_true",
+        help="Write the best-matching race sync to the DB (use GPSU as sync_utc)",
+    )
+    gp.add_argument(
+        "--race-id",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Override auto-matched race ID (use with --commit to force a specific race)",
+    )
 
     llv = sub.add_parser(
         "link-local-video",
@@ -2107,7 +2171,15 @@ def main() -> None:
                 sync_offset = 0.0 if args.start else args.sync_offset
                 asyncio.run(_link_video(args.url, sync_utc_iso, sync_offset))
             case "gopro-match":
-                asyncio.run(_gopro_match(args.path, args.timezone, args.db))
+                asyncio.run(
+                    _gopro_match(
+                        args.path,
+                        args.timezone,
+                        args.db,
+                        commit=args.commit,
+                        race_id_override=args.race_id,
+                    )
+                )
             case "link-local-video":
                 asyncio.run(
                     _link_local_video(

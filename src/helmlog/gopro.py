@@ -347,10 +347,6 @@ class GoProVideo:
             return None
         return self.creation_utc + timedelta(seconds=self.duration_s)
 
-    @property
-    def gps_source(self) -> str:
-        """Human-readable label for the position source."""
-        return "gpmf" if self.gpmf_track else "tag"
 
 
 def probe_video(path: Path, timezone: str = "UTC") -> GoProVideo:

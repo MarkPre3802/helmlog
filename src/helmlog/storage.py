@@ -2641,10 +2641,11 @@ class Storage:
 
         db_path = self._config.db_path
         is_new = not os.path.exists(db_path)
-        self._db = await aiosqlite.connect(db_path)
+        self._db = await aiosqlite.connect(db_path, timeout=30)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.execute("PRAGMA journal_mode = WAL")
+        await self._db.execute("PRAGMA busy_timeout = 30000")
         if is_new and os.path.exists(db_path):
             # Python sqlite3 creates files with 0644 regardless of umask.
             # Add group-write so both the helmlog service account and the
@@ -3118,8 +3119,8 @@ class Storage:
             )
             if cur.rowcount > 0:
                 added += 1
+        await db.commit()
         if added:
-            await db.commit()
             logger.info("Synced {} new ParameterDef(s) into controls table", added)
 
     async def _migrate_v56_categories(self) -> None:
