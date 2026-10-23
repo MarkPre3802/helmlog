@@ -181,6 +181,43 @@ Resolved through review discussion (2026-08-15):
    happens from the web server, not the Pi. End-to-end user experience:
    plug in the card, wait, then see video + data together on the website,
    auto-synced by GPS time with no manual step.
+16. **Homelab hardware: 4th-gen Xeon, 32GB RAM, running Proxmox.** Sized
+   against the app/sync/DB workload only — the video-serving component is
+   kept architecturally separate (own volume/service, not bundled into the
+   main app process, so it can move to object storage + CDN later without
+   a rewrite), so this box doesn't need to carry video storage/bandwidth.
+   Per-boat SQLite storage (KB-MB per race, tens of GB even at scale), an
+   I/O-bound web app reused unchanged from the Pi codebase (decision 7),
+   and on-demand-only sync bursts (decision 11, no continuous load) are
+   comfortably covered by a small slice of this host — a couple vCPUs and
+   a few GB RAM in a Proxmox guest, with the rest of the Xeon free for
+   other use. LXC vs full VM for that guest is left as an implementation
+   detail, not yet decided. If/when video hosting is brought into this
+   same server's scope, this sizing would need revisiting.
+17. **OS: Debian 12 (Bookworm). Web server: the same nginx-reverse-proxy →
+   uvicorn/FastAPI pattern already running on the Pi** — no new stack.
+   Raspberry Pi OS is Debian-based, so staying on Debian keeps
+   `scripts/setup.sh`, `bootstrap-new-pi.md`, and the `/diagnose` runbook
+   nearly 1:1 transferable instead of forking Ubuntu-specific ops docs.
+   Subdomain routing (decision 3a) happens in a Python middleware layer
+   inside the FastAPI app (decision 7), not in nginx — nginx's job stays
+   simple: TLS termination + reverse proxy, same as today. This guest needs
+   a much smaller install than the Pi: `uv` + Python deps + nginx + a
+   systemd unit for the app — none of the Pi's Signal K / InfluxDB /
+   Grafana / CAN-interface / audio pieces, which are hardware/
+   background-loop code already excluded by decision 7.
+18. **Reachability (for now): Tailscale, not Cloudflare Tunnel wildcard
+   subdomains yet.** The Proxmox host joins the same tailnet already used
+   for inter-boat MagicDNS (`scripts/setup.sh` step k.3) — reachable over
+   the tailnet directly, or via Tailscale Funnel at
+   `<hostname>.<tailnet>.ts.net` if public access is needed before it's
+   locked down further. Explicitly staged: decision 3a's per-boat
+   wildcard-subdomain scheme (`<boat>.helmlog.org` via Cloudflare Tunnel)
+   is still the target once boats outside your own tailnet are being
+   onboarded — Funnel only gives one hostname for the whole server, not
+   per-boat subdomains, so it doesn't yet satisfy decision 3a for real
+   multi-tenant use. Good enough while the server is still just you,
+   building and testing. Revisit before onboarding outside boats.
 
 ## Open questions
 
@@ -209,12 +246,14 @@ Still to be resolved before this is spec-ready:
    separate pipe, new-rows-only for v1, on-demand trigger via a button on
    `/admin/network`, and resumable/idempotent delivery with no silent
    retry on an unreachable server.
-6. What specs would the web server itself need (compute/storage/bandwidth),
-   especially given decision 4 (hosted video) as the likely cost driver?
-7. On a homelab starting point, how is the server made reachable from the
-   outside (equivalent question to the Pi's own tunnel options in
-   `docs/https-deployment.md`, but now for a multi-tenant central server —
-   different risk profile than a single boat's own Tailscale Funnel)?
+6. ~~What specs would the web server itself need (compute/storage/
+   bandwidth)?~~ **Resolved by decision 16**: a 4th-gen Xeon / 32GB RAM
+   Proxmox homelab host, sized against the app/sync/DB workload with video
+   kept architecturally separate.
+7. ~~On a homelab starting point, how is the server made reachable from the
+   outside?~~ **Resolved by decision 18**: Tailscale for now (tailnet or
+   Funnel), staged ahead of decision 3a's Cloudflare Tunnel wildcard
+   subdomains once boats outside your own tailnet are being onboarded.
 8. ~~Does GPS-location-tag presence reliably imply a GPS-disciplined
    `creation_time`, for the actual cameras in use?~~ **Resolved by the
    validation spike**: no — container `creation_time` was found off by 10
