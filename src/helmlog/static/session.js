@@ -8,6 +8,7 @@ let _session = null;
 let _map = null;
 let _trackData = null; // {latLngs, timestamps (as Date), line, cursor}
 let _videoSync = null; // {syncUtc (Date), syncOffsetS, durationS, player}
+let _videoPan = null; // {refresh} from attachVideoPan() — 360 drag-to-pan (#844)
 let _ytReady = false;
 let _syncTimer = null;
 
@@ -301,6 +302,9 @@ let _speakerMap = {}; // speaker_map from API (crew assignments)
 // Bootstrap
 // ---------------------------------------------------------------------------
 
+// Coach principals (#848) get a read-only subset of the page.
+const _IS_COACH = cfg.dataset.userRole === 'coach';
+
 async function init() {
   await initTimezone();
 
@@ -326,6 +330,22 @@ async function init() {
   _session = await r.json();
 
   renderHeader();
+  if (_IS_COACH) {
+    // Coach mode (#848): read-only view of granted data only. The server
+    // enforces this too — skipping the other loaders just avoids a page full
+    // of denied requests. Video only when the grant shares it.
+    const hasVideo = !!_session.first_video_url;
+    await Promise.all([loadTrack(), hasVideo ? loadVideoPlayer() : Promise.resolve()]);
+    loadManeuvers();
+    if (hasVideo) loadVideos();
+    if (_session.has_wind_field) loadWindField();
+    if (_session.type !== 'debrief') {
+      loadResults();
+      if (_session.end_utc) loadPolar();
+    }
+    _applyDeepLink();
+    return;
+  }
   // Load track and videos in parallel, then wire up sync
   await Promise.all([loadTrack(), loadVideoPlayer()]);
   loadManeuvers();
@@ -2012,10 +2032,8 @@ function _createPlayer(videoId) {
   }
   // Use the standard YT.Player div-based instantiation. The manual iframe
   // approach broke YouTube's embedder identity verification (Error 153).
-  // 360 video panning is NOT supported in YouTube iframe embeds for
-  // third-party domains regardless of `allow` attributes — it only works on
-  // youtube.com itself and in the YouTube app. We expose a "Watch on YouTube"
-  // link below the player as the workaround for spherical videos.
+  // The embed ignores mouse drags on 360 videos, but the IFrame API's
+  // setSphericalProperties() works — #yt-pan-layer (video_pan.js) drives it.
   _videoSync.player = new YT.Player('yt-player', {
     height: '100%',
     width: '100%',
@@ -2032,6 +2050,8 @@ function _createPlayer(videoId) {
     },
   });
   _ensureWatchOnYoutubeLink();
+  const panLayer = document.getElementById('yt-pan-layer');
+  if (panLayer) _videoPan = attachVideoPan(panLayer, () => _videoSync && _videoSync.player);
 }
 
 // Create an HTML5 <video> player for a locally-served file and install a
@@ -2122,6 +2142,7 @@ function _startYtScrubWatch() {
 
 function _onVideoReady() {
   _startYtScrubWatch();
+  if (_videoPan) _videoPan.refresh();
   // Video is a consumer: seek to the requested UTC if it's within range.
   // Large jumps (>2 s) pause the player so audio doesn't keep playing from
   // wherever the user just clicked. Small deltas (playback ticks) don't
@@ -2186,6 +2207,9 @@ function switchVideo(idx) {
 }
 
 function _onPlayerStateChange(event) {
+  // Re-check on every state change: switchVideo() may load a flat video
+  // after a 360 one (or vice versa).
+  if (_videoPan) _videoPan.refresh();
   // YT.PlayerState.PLAYING = 1, PAUSED = 2, ENDED = 0, BUFFERING = 3
   if (event.data === 1) {
     // If we're inside the echo window from a recent programmatic seek,
@@ -2581,7 +2605,7 @@ async function loadResults() {
   }
 
   body.innerHTML = html;
-  if (!imported) {
+  if (!imported && !_IS_COACH) {
     renderLinkImportedSlot();
   }
 }
@@ -6406,7 +6430,8 @@ function renderManeuverCard() {
       + (_maneuverLineChartsOn ? 'var(--bg-primary)' : 'var(--text-secondary)') + ';cursor:pointer;border-radius:3px"'
       + ' onclick="toggleManeuverLineCharts()"'
       + ' title="BSP / heading rate / TWA stacked line charts aligned at head-to-wind">line charts</button>'
-    + '<a href="/api/sessions/' + SESSION_ID + '/maneuvers.csv" download style="color:var(--accent);text-decoration:none">CSV &#8595;</a>'
+    // No CSV export for coaches (#848): policy forbids bulk export.
+    + (_IS_COACH ? '' : '<a href="/api/sessions/' + SESSION_ID + '/maneuvers.csv" download style="color:var(--accent);text-decoration:none">CSV &#8595;</a>')
     + '</div>';
 
   const filters = ['all', 'tack', 'gybe', 'rounding', 'P\u2192S', 'S\u2192P', 'good', 'bad'];
@@ -6663,7 +6688,7 @@ function _renderManeuverDetail(m) {
 // Small tag-picker strip rendered beneath the maneuver detail metrics
 // whenever a maneuver is selected in the session page table.
 function _renderManeuverTagRow(m) {
-  if (!m || m.id == null) return '';
+  if (!m || m.id == null || _IS_COACH) return '';
   return '<div style="margin-top:8px;padding:8px;background:var(--bg-secondary);border-radius:3px">'
     + '<div style="font-size:.7rem;color:var(--text-secondary);margin-bottom:4px">Tags</div>'
     + '<tag-picker entity-type="maneuver" entity-id="' + esc(String(m.id)) + '"></tag-picker>'
