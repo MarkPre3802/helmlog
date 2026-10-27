@@ -262,3 +262,37 @@ Still to be resolved before this is spec-ready:
    preference to `creation_time`, tagging the source via `creation_source`
    (`"gpmf:GPSU"` vs `"ffprobe:creation_time"`) so decision 14's auto-link
    gate can check it directly.
+
+## Implementation status
+
+**2026-10-27, branch `websitehosting`: first deployable cut.** Walkthrough:
+[docs/web-hosting-deployment.md](../web-hosting-deployment.md).
+
+Built:
+- Decision 7 (multi-tenant layer): `src/helmlog/hosting/`. A boat registry
+  (`registry.db`: boats, hostnames, current DB file), a per-boat app pool
+  (lazily opened, idle-evicted), and an ASGI dispatcher that resolves the boat
+  from the Host header (decision 3a: explicit host → `<slug>.<base_domain>` →
+  default boat). Each boat runs the unchanged `create_app()` in a new
+  `hosted=True` mode, which leaves out routes that act on the host machine
+  (deploy, network, cameras, race-start timer, federation/peer API).
+- Decisions 16–18: `scripts/deploy-web.sh`, an idempotent install/update for a
+  Debian 12 Proxmox guest (uv, nginx, systemd `helmlog-web`, Tailscale
+  serve/funnel).
+- **Interim stand-in for decisions 8–12:** `scripts/push-to-web.sh` is an
+  on-demand, whole-database push from the Pi (consistent online backup → SSH →
+  `helmlog-hosting boat import`). Each push *replaces* the boat's data. Imports
+  land as new files, never overwriting the open WAL database, and the server
+  switches over between requests. A snapshot newer than the server's schema is
+  refused. Anything written on the website is lost on the next push, so the
+  notes write-back of decision 5 still needs the real sync.
+- Data-licensing review: snapshots strip `crew_voice_profiles` (biometric),
+  `wlan_profiles` (Wi-Fi passwords) and live login/reset/invite/nonce tokens,
+  on the Pi and again on import (`hosting/snapshot.py`).
+
+Not built yet: incremental signed row-sync with a Sync button on
+`/admin/network` (decisions 8–12, Critical tier, needs its own spec), notes
+write-back (5), the separate video service (16; video is mirrored with rsync
+into `boats/<slug>/videos/` for now), GoPro Pi-side ingest (15), Cloudflare
+wildcard subdomains (3a/18; supported by `HELMLOG_HOSTING_BASE_DOMAIN` but not
+deployed), and per-boat `PUBLIC_URL` for reset emails.

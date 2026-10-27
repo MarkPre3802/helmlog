@@ -51,6 +51,7 @@ dependencies = [
 
 [project.scripts]
 helmlog = "helmlog.main:main"
+helmlog-hosting = "helmlog.hosting.cli:main"
 
 [build-system]
 requires = ["hatchling"]
