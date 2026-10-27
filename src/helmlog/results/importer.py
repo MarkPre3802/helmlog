@@ -9,9 +9,9 @@ the same data produces zero net changes (R15, R16, R17).
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from loguru import logger
 
@@ -60,10 +60,30 @@ def _filter_races_for_own_sail(
     If *own_sail* is unknown OR every race lacks it (spectator regatta),
     return *races* unchanged so we don't accidentally drop everything.
     """
-    if not own_sail:
+    own = normalize_sail(own_sail)
+    if not own:
         return races
-    kept = tuple(r for r in races if any(f.sail_number == own_sail for f in r.finishes))
+    kept = tuple(r for r in races if any(normalize_sail(f.sail_number) == own for f in r.finishes))
     return kept if kept else races
+
+
+_SAIL_PREFIX_RE = re.compile(r"^[A-Z]+(?=\d)")
+
+
+def normalize_sail(sail: str | None) -> str:
+    """Canonicalize a sail number for own-boat matching.
+
+    Scoring sites are inconsistent about the national prefix — STYC prints
+    the same boat as ``475`` on one page and ``USA 475`` on another — so
+    compare on the bare number: uppercase, drop whitespace/hyphens, strip a
+    leading run of letters when digits follow (``USA 475`` → ``475``,
+    ``CAN-5001`` → ``5001``). All-letter sails keep their identity so they
+    don't collapse to ``""`` and match everything (#835).
+    """
+    if not sail:
+        return ""
+    compact = re.sub(r"[\s\-]+", "", sail).upper()
+    return _SAIL_PREFIX_RE.sub("", compact)
 
 
 def _assign_places(finishes: tuple[BoatFinish, ...]) -> list[tuple[int, BoatFinish]]:
@@ -132,6 +152,8 @@ async def import_results(
 
     boat_cache: dict[str, int] = {}
 
+    venue_tz = _resolve_venue_tz(reg.venue_tz)
+
     for race_data in races_to_import:
         if not race_data.date:
             logger.warning(
@@ -140,7 +162,7 @@ async def import_results(
             )
             continue
 
-        race_id = await _upsert_race(db, race_data, regatta_id, reg)
+        race_id = await _upsert_race(db, race_data, regatta_id, reg, venue_tz=venue_tz)
 
         ranked = _assign_places(race_data.finishes)
         for place, finish in ranked:
@@ -150,9 +172,8 @@ async def import_results(
 
         counts["races_upserted"] += 1
 
-    venue_tz = _resolve_venue_tz(reg.venue_tz)
     _linked, touched_sessions = await _link_regatta_races_to_local_sessions(
-        db, regatta_id, venue_tz=venue_tz
+        db, regatta_id, venue_tz=venue_tz, own_sail=own_sail
     )
 
     for standing in results.standings:
@@ -214,19 +235,55 @@ async def import_results(
 
 
 def _resolve_venue_tz(venue_tz: str | None) -> tzinfo:
-    """Resolve a venue timezone with sensible fallbacks.
+    """Resolve a venue timezone — see :func:`helmlog.results.base.resolve_venue_tz`."""
+    from helmlog.results.base import resolve_venue_tz
 
-    Order: explicit ``regatta.venue_tz`` → system local tz → UTC.
+    return resolve_venue_tz(venue_tz)
+
+
+async def _own_boat_did_not_sail(
+    db: aiosqlite.Connection, race_id: int, own_sail: str | None
+) -> bool:
+    """True when the own boat is scored DNC/DNS in imported race *race_id*.
+
+    A race the boat never started can't correspond to a logged session on
+    that date, so the auto-linker skips it (#832). Unknown sail, or own
+    boat absent from the race, means "no evidence" → False.
     """
-    if venue_tz:
-        try:
-            return ZoneInfo(venue_tz)
-        except ZoneInfoNotFoundError:
-            logger.warning("Unknown venue_tz {!r}, falling back", venue_tz)
-    local = datetime.now().astimezone().tzinfo
-    if local is not None:
-        return local
-    return ZoneInfo("UTC")
+    own = normalize_sail(own_sail)
+    if not own:
+        return False
+    cur = await db.execute(
+        "SELECT b.sail_number, rr.status_code, rr.dns FROM race_results rr"
+        " JOIN boats b ON b.id = rr.boat_id WHERE rr.race_id = ?",
+        (race_id,),
+    )
+    for sail, status, dns in await cur.fetchall():
+        if normalize_sail(sail) == own:
+            return (status or "").upper() in ("DNC", "DNS") or bool(dns)
+    return False
+
+
+async def _linked_session_on_date(
+    db: aiosqlite.Connection,
+    session_id: int | None,
+    date_iso: str,
+    venue_tz: tzinfo,
+) -> bool:
+    """True when live session *session_id* started on venue-local *date_iso*."""
+    if session_id is None:
+        return False
+    cur = await db.execute("SELECT start_utc FROM races WHERE id = ?", (session_id,))
+    row = await cur.fetchone()
+    if not row or not row[0]:
+        return False
+    try:
+        dt = datetime.fromisoformat(row[0])
+    except (ValueError, TypeError):
+        return False
+    if dt.tzinfo is None:
+        return False
+    return dt.astimezone(venue_tz).date().isoformat() == date_iso
 
 
 async def _link_regatta_races_to_local_sessions(
@@ -235,6 +292,7 @@ async def _link_regatta_races_to_local_sessions(
     *,
     venue_tz: tzinfo | None = None,
     force: bool = False,
+    own_sail: str | None = None,
 ) -> tuple[int, set[int]]:
     """Link imported races to local race sessions on the same venue-local date.
 
@@ -301,6 +359,17 @@ async def _link_regatta_races_to_local_sessions(
             imported,
             key=lambda row: (row[1] is None, row[1] if row[1] is not None else 0, row[0]),
         )
+
+        # Races the own boat is scored DNC/DNS in can't be a logged session;
+        # drop them before zipping so they don't consume a slot (#832).
+        if own_sail:
+            imported_sorted = [
+                row
+                for row in imported_sorted
+                if not await _own_boat_did_not_sail(db, row[0], own_sail)
+            ]
+            if not imported_sorted:
+                continue
 
         zip_in_order = len(local_sessions) >= len(imported_sorted)
 
@@ -419,6 +488,8 @@ async def _upsert_race(
     race: RaceData,  # noqa: F821
     regatta_id: int,
     reg: Regatta,  # noqa: F821
+    *,
+    venue_tz: tzinfo | None = None,
 ) -> int:
     from helmlog.results.base import RaceData
 
@@ -439,13 +510,19 @@ async def _upsert_race(
         old_date_cur = await db.execute("SELECT date FROM races WHERE id = ?", (row[0],))
         old_date_row = await old_date_cur.fetchone()
         old_date = old_date_row[0] if old_date_row else None
-        date_changed = race.date and old_date != race.date
+        date_changed = bool(race.date) and old_date != race.date
+        # Only drop the link when the linked live session is genuinely on
+        # another venue-local day. A provider correcting a UTC date to the
+        # venue-local one (#832) must not throw away hand-made links.
+        clear_link = date_changed and not await _linked_session_on_date(
+            db, row[1], race.date, venue_tz or _resolve_venue_tz(reg.venue_tz)
+        )
 
         placeholder_iso = f"{race.date}T00:00:00+00:00" if race.date else None
         await db.execute(
             "UPDATE races SET name = ?, race_num = ?, date = ?, "
             "start_utc = COALESCE(?, start_utc), end_utc = COALESCE(?, end_utc)"
-            + (", local_session_id = NULL" if date_changed else "")
+            + (", local_session_id = NULL" if clear_link else "")
             + " WHERE id = ?",
             (
                 name,
@@ -456,7 +533,7 @@ async def _upsert_race(
                 row[0],
             ),
         )
-        if date_changed:
+        if clear_link:
             logger.info(
                 "Race {} date changed {} → {} — cleared local_session_id for re-linking",
                 row[0],

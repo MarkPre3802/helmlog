@@ -95,15 +95,15 @@ async def api_discover_regatta(
 ) -> JSONResponse:
     """Discover a regatta's metadata from a pasted URL.
 
-    Supports both Clubspot (returns the regatta's class list so the admin
-    can pick which to import) and STYC (scrapes the race/series HTML for
-    the regatta name).  The source is auto-detected from the URL when not
-    supplied explicitly.
+    Supports Clubspot and Yacht Scoring (both return the regatta's class
+    list so the admin can pick which to import) and STYC (scrapes the
+    race/series HTML for the regatta name).  The source is auto-detected
+    from the URL when not supplied explicitly.
     """
     import httpx
 
     detected = source or _detect_source(url)
-    if detected not in ("clubspot", "styc"):
+    if detected not in ("clubspot", "styc", "yachtscoring"):
         raise HTTPException(400, f"Cannot detect a known results source in URL {url!r}")
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -120,6 +120,20 @@ async def api_discover_regatta(
                         "name": info.name,
                         "url": info.url,
                         "classes": [{"id": c.id, "name": c.name} for c in info.classes],
+                    }
+                )
+
+            if detected == "yachtscoring":
+                from helmlog.results.yachtscoring import YachtScoringProvider
+
+                ys_info = await YachtScoringProvider(client=client).discover_regatta(url)
+                return JSONResponse(
+                    {
+                        "source": "yachtscoring",
+                        "source_id": ys_info.source_id,
+                        "name": ys_info.name,
+                        "url": ys_info.url,
+                        "classes": [{"id": c.id, "name": c.name} for c in ys_info.classes],
                     }
                 )
 
@@ -146,6 +160,8 @@ def _detect_source(url: str) -> str:
     lowered = url.lower()
     if "styc.org" in lowered:
         return "styc"
+    if "yachtscoring.com" in lowered:
+        return "yachtscoring"
     if "clubspot" in lowered or "theclubspot" in lowered:
         return "clubspot"
     return ""
@@ -215,10 +231,14 @@ async def api_fetch_results(
     async with httpx.AsyncClient() as client:
         from helmlog.results.clubspot import ClubspotProvider
         from helmlog.results.styc import StycProvider
+        from helmlog.results.yachtscoring import YachtScoringProvider
 
-        providers_map: dict[str, type[ClubspotProvider] | type[StycProvider]] = {
+        providers_map: dict[
+            str, type[ClubspotProvider] | type[StycProvider] | type[YachtScoringProvider]
+        ] = {
             "clubspot": ClubspotProvider,
             "styc": StycProvider,
+            "yachtscoring": YachtScoringProvider,
         }
         cls = providers_map.get(row["source"])
         if not cls:
@@ -369,7 +389,10 @@ async def api_rematch_regatta(
     up a regatta that was imported before zip-in-order matching was
     introduced (see #550).
     """
-    from helmlog.results.importer import _link_regatta_races_to_local_sessions
+    from helmlog.results.importer import (
+        _link_regatta_races_to_local_sessions,
+        _own_sail_number,
+    )
 
     storage = get_storage(request)
     db = storage._conn()
@@ -386,7 +409,7 @@ async def api_rematch_regatta(
     races_checked = int(row[0]) if row else 0
 
     linked, touched_sessions = await _link_regatta_races_to_local_sessions(
-        db, regatta_id, force=True
+        db, regatta_id, force=True, own_sail=_own_sail_number()
     )
 
     # Drop cached session_summary blobs for every live session we rewrote
