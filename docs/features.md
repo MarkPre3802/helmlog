@@ -483,6 +483,12 @@ cockpit.
   co-op data access, with IP, user-agent, and timestamp.
 - **Event rules** (`/admin/events`) — day-of-week event-name
   defaults.
+- **Hosted website** — a review-only HelmLog server for many boats,
+  off the boat (Proxmox/Debian 12). Each boat has its own database
+  and hostname, and crew log in with their Pi accounts. Data arrives
+  by an on-demand push from the Pi (`scripts/push-to-web.sh`).
+  Install and update with `scripts/deploy-web.sh`. See
+  [web-hosting-deployment.md](web-hosting-deployment.md).
 
 ### Federation (`/admin/federation`)
 

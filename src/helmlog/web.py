@@ -13,6 +13,7 @@ Security:
 from __future__ import annotations
 
 import os
+import pathlib
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
@@ -45,19 +46,30 @@ def create_app(
     recorder: AudioRecorder | AudioRecorderGroup | None = None,
     audio_config: AudioConfig | None = None,
     can_writer: object | None = None,
+    *,
+    hosted: bool = False,
+    videos_dir: pathlib.Path | None = None,
 ) -> FastAPI:
     """Create and return the FastAPI application bound to the given Storage.
 
     If *recorder* and *audio_config* are provided, recording starts when a race
     starts and stops when the race ends.  Cameras are managed in the database
     and loaded dynamically for each operation.
+
+    *hosted* builds the review-only app used per boat on the hosted web server
+    (``helmlog.hosting``): routes that act on the machine they run on (deploy,
+    network, cameras, race-start timer, federation/peer API) are left out,
+    since on a shared server that machine is the server itself.
     """
     from slowapi import _rate_limit_exceeded_handler
     from slowapi.errors import RateLimitExceeded
 
     from helmlog.routes._helpers import limiter
 
-    limiter.reset()
+    # The limiter is process-global. Resetting it is for tests; on the hosted
+    # server every boat app that opens would otherwise wipe login rate limits.
+    if not hosted:
+        limiter.reset()
     app = FastAPI(title="HelmLog", docs_url=None, redoc_url=None)
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
@@ -111,18 +123,17 @@ def create_app(
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     # -- Local video files (served at /videos/<filename>) --
-    import pathlib
-
-    _videos_dir = pathlib.Path(os.environ.get("VIDEOS_DIR", "/home/mark/videos"))
+    _videos_dir = videos_dir or pathlib.Path(os.environ.get("VIDEOS_DIR", "/home/mark/videos"))
     if _videos_dir.is_dir():
         app.mount("/videos", StaticFiles(directory=str(_videos_dir)), name="videos")
 
     # -- Peer API (federation endpoints for remote boats) --
-    from helmlog.peer_api import _limiter as peer_limiter
-    from helmlog.peer_api import router as peer_router
+    if not hosted:
+        from helmlog.peer_api import _limiter as peer_limiter
+        from helmlog.peer_api import router as peer_router
 
-    app.state.peer_limiter = peer_limiter
-    app.include_router(peer_router)
+        app.state.peer_limiter = peer_limiter
+        app.include_router(peer_router)
 
     # -- Theme middleware: injects resolved CSS variables into request.state --
     # NOTE: inject_theme_css is registered BEFORE auth_middleware.  In Starlette's
@@ -294,6 +305,7 @@ def create_app(
         ws,
     )
 
+    host_control = {deployment, network, cameras, device_cameras, race_start, federation}
     for module in (
         pages,
         coach,
@@ -332,13 +344,16 @@ def create_app(
         pgn_audit,
         ws,
     ):
+        if hosted and module in host_control:
+            continue
         app.include_router(module.router)
 
     # Race-start simulator (#690). Routes are always mounted but gated on
     # the developer flag (users.is_developer = 1). RACE_START_SIMULATOR=false
     # is a hard kill switch that turns the routes into 404s for defense in
     # depth on production boats.
-    app.include_router(race_start_sim.router)
+    if not hosted:
+        app.include_router(race_start_sim.router)
 
     # -- Register results providers (#459) --
     from helmlog.results.base import register_provider
