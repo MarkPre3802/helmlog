@@ -2598,7 +2598,146 @@ off-network; iterate on auth, real-time, and PII-bearing data later.
 
 ---
 
-## IDX-039: GoPro GPS-time auto-sync — zero-friction video-to-race alignment
+## IDX-039: HelmLog Lite — M5Stack Core2 boats + central server, tiered participation
+
+- **Date captured:** 2026-10-19
+- **Origin:** Review of the M5Stack Core2 v1.3
+  (https://docs.m5stack.com/en/core/Core2_v1.3) as a way to make HelmLog
+  cheaper to run on more boats, alongside a central server being built
+  separately. Shared (as an AI-written summary) with Peer Gynt and Creative.
+- **Status:** `raw`
+- **Related:** **IDX-038** / #757 (cloud-hosted viewer + replication — the
+  central server this would feed), IDX-034 (DB replication), IDX-032 (ESP32
+  accelerometer sea state), IDX-030 (ESP32 rudder sensor), #423 (device API
+  keys), #660 / `docs/esp32cam-setup.md` (ESP32 push-mode pattern),
+  `vakaros_inbox.py` (external-device log → session import), #822 (screen
+  JSON model), #789 (B&G start timer), `docs/federation-design.md`,
+  `docs/data-licensing.md`
+
+**Description:**
+Lower the barrier to entry by letting boats participate without running the
+full Pi stack. Once a central server does decoding/analysis/comparison, a boat
+only needs to capture data and upload it. Three tiers, all feeding the same
+server so every boat can compare races and share in the co-op:
+
+1. **Full Pi** (Corvo, Creative today) — audio, video, onboard web UI.
+   Optionally syncs to the central server (doubles as off-boat backup).
+2. **M5Stack Lite** (Peer Gynt today runs only an M5Stack) — Core2 (~$55;
+   ESP32, 8 MB PSRAM, 2" touchscreen, IMU, microSD, Wi-Fi, battery) plus a
+   Grove CAN transceiver (~$15) reads NMEA 2000 directly via the ESP32's TWAI
+   controller. Logs to SD, uploads after racing. ~$100 all in, no Linux box.
+3. **No instruments** — Core2 + Grove GPS + onboard IMU (heel/pitch) for
+   tracks, starts, maneuvers. Fits club/charter boats or boats with no
+   instrument system.
+
+**Design sketch:**
+- Firmware logs **raw, PGN-filtered frames** (position, COG/SOG, wind, STW,
+  heading, attitude) append + fsync per record. Decoding happens server-side
+  with the existing `nmea2000.py` — a deliberate exception to "decode early":
+  dumb firmware, reuses tested decoders, logs are re-decodable after decoder
+  fixes.
+- Ingest endpoint (e.g. `POST /api/ingest/raw`) authenticated by device API
+  key (#423) or an Ed25519-signed upload; modeled on the Vakaros inbox import.
+- Central store: simplest shape is one SQLite file per boat opened by the
+  existing `Storage` — preserves per-boat ownership, export and deletion map
+  to a file.
+- Side use: Core2 as a cockpit remote for Pi boats (start timer, mark/moment
+  buttons, vibration countdown), rendering the #822 screen JSON. IPS LCD is
+  weak in sunlight vs e-paper and needs a waterproof case.
+
+**Open questions:**
+- What firmware does Peer Gynt's M5Stack run, what does it record, and how do
+  logs come off it? (Assumed it logs instrument data — unverified.)
+- Does the ESP32 keep up with the bus at the filtered PGN set?
+- Data licensing for a central store: `federation-design.md` currently says
+  "no central server" and the gateway holds no sailing data at rest. Embargo,
+  co-op opt-in, protest firewall and deletion enforcement move from boat to
+  server. Policy to be evolved alongside the central server work.
+- Cost honesty: a Pi Zero 2 W + CAN HAT is similar BOM to Core2 + CAN unit.
+  The real per-boat saving is ops burden (cards, Tailscale, deploys, backups),
+  which the central server removes — not the board itself.
+
+**Notes:**
+- *2026-10-19:* Initial capture. Not mature enough for an issue — depends on
+  the separately built central server and on what Peer Gynt's device already
+  does. Natural first step: get Peer Gynt's M5Stack logs into HelmLog and
+  diff against a Pi boat (Corvo/Creative) on the same race. Alternative
+  bench test: Core2 + CAN unit alongside Corvo's Pi for one race.
+
+---
+
+## IDX-040: Vakaros RaceSense collaboration — instrumented boats in the fleet replay
+
+- **Date captured:** 2026-10-27
+- **Origin:** Research into the Vakaros RaceSense replay
+  (https://racesense.vakaros.com/watch/VaWTh1uA7TrLejoSFlUn — 2026 IC37 North
+  Americans), in the context of an ongoing conversation with Vakaros. Written up
+  as a shareable proposal page for Vakaros:
+  https://claude.ai/artifact/9H5stoaAxmdtVs6K6MuVar
+- **Status:** `raw`
+- **Related:** `vakaros.py` / `vakaros_inbox.py` (#458, VKX import),
+  `video.py` (UTC→YouTube offset), `static/video_pan.js` (#844/#846 360°
+  drag-to-pan), `maneuver_detector.py` + `analysis/maneuvers.py` +
+  `analysis/compare.py` (#741), #839 (video-derived fleet analysis), IDX-037
+  (race start management), IDX-038 / #757 (cloud viewer),
+  `docs/data-licensing.md`
+
+**Description:**
+RaceSense has every boat and mark in the fleet but only GPS + IMU per device
+(lat/lon, heading, heel, trim, SOG, race stage) and a *modelled* wind grid
+(ERA5/Open-Meteo). HelmLog has the opposite: measured TWS/TWD, BSP, sail/rig
+settings, audio and synced 360° video, but only for HelmLog boats. Combining
+them lets HelmLog boats act as wind sensors and cameras for the fleet replay,
+and lets fleet manoeuvres be indexed by real conditions — e.g. "when were
+USA 475 and CAN 89 in crossing situations in 10–15 kt?"
+
+Five ideas, in order of effort:
+
+1. **Two-way deep links** — works today. RaceSense share links accept
+   `?event&division&race&ts&boat&view&tab`; HelmLog stores the RaceSense
+   event ID per regatta and links out at any moment, and exposes a
+   `?ts=` route back to the matching session + video.
+2. **Measured wind sidecar** — opted-in boats upload a TWS/TWD track per
+   event (post-race batch first); RaceSense shows it instead of model wind.
+3. **"Watch from this boat"** — register YouTube ID + UTC start per boat per
+   event; RaceSense computes the offset. With 360° video, auto-pan toward a
+   selected boat using the relative bearing (both positions are known).
+4. **Fleet manoeuvre + crossing index** — tacks, gybes, roundings, starts and
+   pairwise crossings (opposite tacks, CPA within N lengths, sign of
+   cross-track offset = who crossed ahead, gap in m and s, gain vs previous
+   crossing), tagged with race, leg, and wind band.
+5. **Natural-language queries** — an LLM writes a structured query over the
+   index; results carry RaceSense and video links, so answers are checkable.
+
+**Technical notes (from the public replay's JS, 2026-10-27):** telemetry comes
+from `teleapi.regatta.app` as a flat `{Fields, Rows}` table (`ts, sn,
+division, sail_number, race_number, start_number, race_stage, role, latitude,
+longitude, pitch, roll, heading, sog, status`), paged at 100k rows; reads are
+moving to short-lived per-event bearer tokens, so treat it as a partner API,
+not something to scrape. Courses are Firestore "achievements" (start line,
+mark roundings, gates) bound to Atlas serial numbers on the marks.
+
+**Open questions / data-licensing conflicts (need a decision before 4–5):**
+
+- Non-member tracks: data-licensing.md ("Full-fleet result imports") forbids
+  capturing GPS tracks of non-member boats. Pulling RaceSense fleet tracks
+  into HelmLog breaks that. Proposed to Vakaros: the index runs inside
+  RaceSense under the organiser's terms; HelmLog only *contributes* data.
+- Protest firewall: RaceSense has an umpire mode; HelmLog-contributed data
+  must stay out of it (or the "not for protest hearings" promise changes).
+- Embargoes: per-event opt-in must respect co-op delayed sharing even when
+  the replay is public.
+- Auto-panning 360° video at another boat is deliberate, not incidental,
+  capture of that crew — may need class-level consent.
+
+**Log:**
+- *2026-10-27:* Initial capture + proposal page shared with Vakaros contact.
+  Suggested first step: one regatta with ≥2 HelmLog boats in a RaceSense
+  fleet; ship idea 1, send measured wind + video links as plain files.
+
+---
+
+## IDX-041: GoPro GPS-time auto-sync — zero-friction video-to-race alignment
 
 - **Date captured:** 2026-06-07
 - **Origin:** Conversation about whether HelmLog race data (GPS-timestamped via

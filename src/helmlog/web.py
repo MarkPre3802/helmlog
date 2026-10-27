@@ -152,7 +152,15 @@ def create_app(
         """Track per-request bandwidth attribution (#403)."""
         return await bandwidth_middleware(request, call_next)
 
-    from helmlog.auth import _is_auth_disabled, _resolve_user, check_device_scope, resolve_device
+    from helmlog.auth import (
+        COACH_LINK_COOKIE,
+        _is_auth_disabled,
+        _resolve_user,
+        check_device_scope,
+        resolve_coach_link,
+        resolve_device,
+    )
+    from helmlog.coach import DEAD_LINK_HTML, coach_path_allowed
 
     _PUBLIC_PATHS = {
         "/login",
@@ -180,7 +188,7 @@ def create_app(
 
             request.state.user = _MOCK_ADMIN
             return await call_next(request)  # type: ignore[no-any-return]
-        if path in _PUBLIC_PATHS or path.startswith(("/static/", "/co-op/", "/auth/")):
+        if path in _PUBLIC_PATHS or path.startswith(("/static/", "/co-op/", "/auth/", "/share/")):
             return await call_next(request)  # type: ignore[no-any-return]
 
         # Try device bearer token auth first (#423)
@@ -201,6 +209,24 @@ def create_app(
         cookie.load(raw_cookie)
         session_val = cookie["session"].value if "session" in cookie else None
         user = await _resolve_user(request, session=session_val)
+        if user is None and COACH_LINK_COOKIE in cookie:
+            # Coach share link (#849). A signed-in session always wins (P8).
+            user = await resolve_coach_link(
+                request.app.state.storage, cookie[COACH_LINK_COOKIE].value
+            )
+            if user is None:
+                # Dead link cookie (P7): clear it and say so, rather than
+                # bouncing a coach to a login page they can't use.
+                from starlette.responses import HTMLResponse as _HR
+                from starlette.responses import JSONResponse as _JR
+
+                dead: Response
+                if "text/html" in request.headers.get("accept", ""):
+                    dead = _HR(DEAD_LINK_HTML, status_code=401)
+                else:
+                    dead = _JR({"detail": "Share link invalid or expired"}, status_code=401)
+                dead.delete_cookie(COACH_LINK_COOKIE)
+                return dead
         if user is None:
             accept = request.headers.get("accept", "")
             if "text/html" in accept:
@@ -215,6 +241,16 @@ def create_app(
 
             return _JR({"detail": "Not authenticated"}, status_code=401)
         request.state.user = user
+        # Coach principals (#848): deny by default — only allowlisted read
+        # paths get through. Per-session scope is enforced in the routes.
+        if user.get("role") == "coach" and not coach_path_allowed(request.method, path):
+            if "text/html" in request.headers.get("accept", "") and request.method == "GET":
+                from starlette.responses import RedirectResponse as _RR
+
+                return _RR(url="/coach", status_code=303)
+            from starlette.responses import JSONResponse as _JR
+
+            return _JR({"detail": "Not available to coaches"}, status_code=403)
         return await call_next(request)  # type: ignore[no-any-return]
 
     # -- Include domain routers --
@@ -227,12 +263,14 @@ def create_app(
         auth,
         boat_settings,
         cameras,
+        coach,
         comments,
         controls,
         crew,
         deployment,
         device_cameras,
         devices,
+        display,
         federation,
         instruments,
         llm,
@@ -258,10 +296,12 @@ def create_app(
 
     for module in (
         pages,
+        coach,
         me,
         auth,
         admin,
         devices,
+        display,
         instruments,
         polar,
         races,
@@ -304,9 +344,11 @@ def create_app(
     from helmlog.results.base import register_provider
     from helmlog.results.clubspot import ClubspotProvider
     from helmlog.results.styc import StycProvider
+    from helmlog.results.yachtscoring import YachtScoringProvider
 
     register_provider(ClubspotProvider())
     register_provider(StycProvider())
+    register_provider(YachtScoringProvider())
 
     # -- Wire WebSocket broadcast to storage live updates --
     import asyncio as _asyncio

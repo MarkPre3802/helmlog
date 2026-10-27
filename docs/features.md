@@ -316,7 +316,7 @@ When the boat is in a co-op (see [`guide-federation.md`](guide-federation.md)):
 
 ### External regatta results
 
-- **Imported regattas** — Clubspot and STYC race results pulled in
+- **Imported regattas** — Clubspot, STYC, and Yacht Scoring race results pulled in
   by the admin; viewers can see series standings, fleet classes,
   and individual race results.
 - **Match local session to external race** — link your locally
@@ -335,6 +335,10 @@ When the boat is in a co-op (see [`guide-federation.md`](guide-federation.md)):
 - **Auto-association by channel** — `helmlog sync-videos
   --channel-id …` matches recent uploads on a channel against
   recent sessions by timestamp.
+- **Fleet analysis from video (planned, #839)** — read the 360° footage
+  at the gun and each rounding for boats ahead, boats to weather, line
+  position, and place per leg; design in
+  [video-analysis.md](video-analysis.md).
 
 ### Themes and timezone
 
@@ -454,7 +458,7 @@ cockpit.
 
 ### Race results (`/admin/race-results`)
 
-- **Discover regattas** — query a provider (Clubspot, STYC) for
+- **Discover regattas** — query a provider (Clubspot, STYC, Yacht Scoring) for
   upcoming or past regattas.
 - **Import** — pull series, races, and results into the local DB.
 - **Rematch** — retry matching local sessions to imported races
